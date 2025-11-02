@@ -1,6 +1,6 @@
 use alpm::{
     Alpm, AnyDownloadEvent, DownloadEvent, DownloadEventCompleted, DownloadEventProgress,
-    DownloadResult, Package, SigLevel, TransFlag, Usage,
+    DownloadResult, Error as AlpmErr, Package, SigLevel, TransFlag, Usage,
 };
 use anyhow::{Result, anyhow};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -12,6 +12,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+
+use crate::ansi::*;
 
 pub struct Pkg {
     pub name: String,
@@ -83,6 +85,7 @@ impl Napm {
 
         handle.add_cachedir(format!("{root}/var/cache/pacman/pkg").as_str())?;
 
+        handle.set_check_space(true);
         handle.set_parallel_downloads(5);
 
         let download_progress = Arc::new(Mutex::new((MultiProgress::new(), HashMap::new())));
@@ -128,6 +131,12 @@ impl Napm {
                 .find_map(|db| db.pkg(*pkg_name).ok())
                 .ok_or_else(|| anyhow!("package '{pkg_name}' not found"))?;
 
+            println!(
+                "[TRACE] Installing {}/{}",
+                pkg.db().unwrap().name(),
+                pkg.name()
+            );
+
             handle
                 .trans_add_pkg(pkg)
                 .map_err(|e| anyhow!("failed to add package to transaction: {e}"))?;
@@ -137,9 +146,61 @@ impl Napm {
             .trans_prepare()
             .map_err(|e| anyhow!("failed to prepare transaction: {e}"))?;
 
-        handle
-            .trans_commit()
-            .map_err(|e| anyhow!("failed to commit transaction: {e}"))?;
+        let commit_result = handle.trans_commit();
+
+        match &commit_result {
+            Ok(()) => {}
+            Err(e) => match e.error() {
+                AlpmErr::PkgInvalid => {
+                    eprintln!(
+                        "[{ANSI_MAGENTA}AUTO REPAIR{ANSI_RESET}] invalid package detected - running automatic repair"
+                    );
+
+                    for cachedir in handle.cachedirs().iter() {
+                        eprintln!(
+                            "[{ANSI_MAGENTA}AUTO REPAIR{ANSI_RESET}] removing broken cache entries from {cachedir}"
+                        );
+
+                        let mut removed = 0;
+
+                        let cache_path = Path::new(cachedir);
+
+                        if let Ok(entries) = fs::read_dir(cache_path) {
+                            for entry in entries.flatten() {
+                                let path = entry.path();
+
+                                fs::remove_file(&path)?;
+                                removed += 1;
+                            }
+                        }
+
+                        eprintln!(
+                            "[{ANSI_MAGENTA}AUTO REPAIR{ANSI_RESET}] removed {removed} cache entries from {cachedir}"
+                        );
+                    }
+
+                    handle
+                        .trans_release()
+                        .map_err(|e| anyhow!("failed to release transaction: {e}"))?;
+
+                    eprintln!(
+                        "[{ANSI_MAGENTA}AUTO REPAIR{ANSI_RESET}] updating the package database"
+                    );
+
+                    handle.syncdbs_mut().update(true)?;
+
+                    eprintln!("[{ANSI_MAGENTA}AUTO REPAIR{ANSI_RESET}] updated");
+
+                    // TODO: key reinit
+
+                    return self.install(pkg_names);
+                }
+                _ => {
+                    eprintln!("[{ANSI_BLUE}TRACE{ANSI_RESET}] Install commit error: {e:?}");
+                    commit_result.map_err(|e| anyhow!("failed to commit transaction: {e}"))?
+                }
+            },
+        }
 
         Ok(())
     }
@@ -147,7 +208,7 @@ impl Napm {
     pub fn update(&mut self) -> Option<Result<()>> {
         let h = self.h_mut();
 
-        if let Err(e) = h.syncdbs_mut().update(false) {
+        if let Err(e) = h.syncdbs_mut().update(true) {
             return Some(Err(anyhow!("failed to refresh dbs: {e}")));
         }
 
