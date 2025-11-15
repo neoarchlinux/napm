@@ -2,9 +2,7 @@ use anyhow::Result;
 
 use crate::napm::Napm;
 
-pub fn run(pkg: &str) -> Result<()> {
-    let napm = Napm::new()?;
-
+pub fn run(napm: &Napm, pkg: &str) -> Result<()> {
     let p = napm.info(pkg)?;
 
     println!("Name          : {}", p.name);

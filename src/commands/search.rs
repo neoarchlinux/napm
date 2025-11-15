@@ -1,17 +1,17 @@
 use anyhow::Result;
 
 use crate::ansi::*;
-use crate::napm::Napm;
+use crate::napm::{Napm, Pkg};
 
-pub fn run(search: &str, num_results: Option<u32>) -> Result<()> {
-    let mut napm = Napm::new()?;
-
-    match napm.sync(false) {
-        Ok(_) => {}
-        Err(e) => eprintln!("\x1b[33mWarning\x1b[0m: using local databases only ({e})"),
+pub fn run(napm: &mut Napm, search: &str, sync: bool, num_results: Option<u32>) -> Result<()> {
+    if sync {
+        match napm.sync(false) {
+            Ok(_) => {}
+            Err(e) => eprintln!("\x1b[33mWarning\x1b[0m: using local databases only ({e})"),
+        }
     }
 
-    fn relevance_score(name: &str, desc: &str, search: &str) -> f64 {
+    fn relevance_score(Pkg { name, desc, .. }: Pkg, search: &str) -> f64 {
         let search_lower = search.to_lowercase();
         let name_lower = name.to_lowercase();
         let desc_lower = desc.to_lowercase();
@@ -26,32 +26,15 @@ pub fn run(search: &str, num_results: Option<u32>) -> Result<()> {
     }
 
     struct SearchResult {
-        db_name: String,
-        name: String,
-        desc: String,
-        version: String,
-
+        pkg: Pkg,
         score: f64,
     }
 
     let mut results = Vec::new();
 
     for pkg in napm.search(&[search])? {
-        let db_name = pkg.db_name;
-        let name = pkg.name;
-        let desc = pkg.desc;
-        let version = pkg.version;
-
-        let score = relevance_score(&name, &desc, search);
-
-        results.push(SearchResult {
-            db_name,
-            name,
-            desc,
-            version,
-
-            score,
-        });
+        let score = relevance_score(pkg.clone(), search);
+        results.push(SearchResult { pkg, score });
     }
 
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
@@ -83,27 +66,27 @@ pub fn run(search: &str, num_results: Option<u32>) -> Result<()> {
         results.iter().collect::<Vec<_>>()
     };
 
-    for (
-        i,
-        SearchResult {
-            db_name,
-            name,
-            desc,
-            version,
-            ..
-        },
-    ) in results.iter().enumerate().rev()
-    {
+    for (i, SearchResult { pkg, .. }) in results.iter().enumerate().rev() {
         let indicator = format!("{ANSI_RED}-{ANSI_RESET}");
 
-        let name = highlight(name, search, ANSI_CYAN);
-        let desc = highlight(desc, search, ANSI_WHITE);
+        if let [f_db_name, f_name] = pkg
+            .formatted_name()
+            .split('/')
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            let name = highlight(f_name, search, ANSI_CYAN);
+            let desc = highlight(&pkg.desc, search, ANSI_WHITE);
+            let version = &pkg.version;
 
-        let n = i + 1;
+            let n = i + 1;
 
-        println!(
-            " {indicator} {ANSI_YELLOW}[{ANSI_BOLD}{n}{ANSI_RESET}{ANSI_YELLOW}]{ANSI_RESET} {ANSI_CYAN}{db_name}{ANSI_WHITE}/{name} {ANSI_BLUE}{version}{ANSI_RESET} {desc}"
-        );
+            println!(
+                " {indicator} {ANSI_YELLOW}[{ANSI_BOLD}{n}{ANSI_RESET}{ANSI_YELLOW}]{ANSI_RESET} {ANSI_CYAN}{f_db_name}{ANSI_WHITE}/{name} {ANSI_MAGENTA}{version}{ANSI_RESET} {desc}"
+            );
+        } else {
+            panic!();
+        }
     }
 
     Ok(())

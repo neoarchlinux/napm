@@ -2,9 +2,7 @@ use anyhow::Result;
 
 use crate::napm::Napm;
 
-pub fn run() -> Result<()> {
-    let mut napm = Napm::new()?;
-
+pub fn run(napm: &mut Napm) -> Result<()> {
     if let Some(r) = napm.update() {
         r
     } else {

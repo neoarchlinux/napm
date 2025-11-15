@@ -1,6 +1,6 @@
 use alpm::{
     Alpm, AnyDownloadEvent, DownloadEvent, DownloadEventCompleted, DownloadEventProgress,
-    DownloadResult, Error as AlpmErr, Package, SigLevel, TransFlag, Usage,
+    DownloadResult, Error as AlpmErr, Package, Progress, SigLevel, TransFlag, Usage,
 };
 use anyhow::{Result, anyhow};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -10,16 +10,62 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use crate::ansi::*;
 
+static PROGRESS_BAR_STYLE: OnceLock<ProgressStyle> = OnceLock::new();
+static PROGRESS_BAR_STYLE_FAILED: OnceLock<ProgressStyle> = OnceLock::new();
+
+fn progress_bar_style(failed: bool) -> &'static ProgressStyle {
+    let progress_chars = "=> ";
+
+    if failed {
+        PROGRESS_BAR_STYLE_FAILED.get_or_init(|| {
+            ProgressStyle::with_template("[{elapsed:>3}] [{bar:40.red/blue}] [FAILED] {msg}")
+                .unwrap()
+                .progress_chars(progress_chars)
+        })
+    } else {
+        PROGRESS_BAR_STYLE.get_or_init(|| {
+            ProgressStyle::with_template("[{elapsed:>3}] [{bar:40.cyan/blue}] {percent:>3}% {msg}")
+                .unwrap()
+                .progress_chars(progress_chars)
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Pkg {
     pub name: String,
     pub version: String,
     pub db_name: String,
     pub desc: String,
+}
+
+impl Pkg {
+    fn into_package_ref(self, handle: &Alpm) -> Result<&Package> {
+        let expect_msg = format!(
+            "[{ANSI_RED}FATAL{ANSI_RESET}]: package '{}' not found in '{}'",
+            self.name, self.db_name
+        );
+
+        handle
+            .syncdbs()
+            .iter()
+            .find(|db| *db.name() == self.db_name)
+            .expect(&expect_msg)
+            .pkg(self.name)
+            .map_err(|_| anyhow!(expect_msg))
+    }
+
+    pub fn formatted_name(&self) -> String {
+        format!(
+            "{ANSI_BLUE}{}{ANSI_RESET}/{ANSI_CYAN}{}{ANSI_RESET}",
+            self.db_name, self.name,
+        )
+    }
 }
 
 impl From<&Package> for Pkg {
@@ -42,8 +88,7 @@ pub struct Napm {
 }
 
 impl Napm {
-    pub fn new() -> Result<Self> {
-        let root = "./test-system";
+    pub fn new(root: &str) -> Result<Self> {
         let dbpath = format!("{root}/var/lib/pacman"); // TODO: maybe change "pacman" to "napm"
 
         let mut handle = Alpm::new(root, &dbpath) //
@@ -91,6 +136,9 @@ impl Napm {
         let download_progress = Arc::new(Mutex::new((MultiProgress::new(), HashMap::new())));
         handle.set_dl_cb(download_progress, download_callback);
 
+        let other_progress = Arc::new(Mutex::new((MultiProgress::new(), HashMap::new())));
+        handle.set_progress_cb(other_progress, progress_callback);
+
         Ok(Self {
             handle: Some(handle),
         })
@@ -104,7 +152,7 @@ impl Napm {
         self.handle.as_mut().unwrap()
     }
 
-    fn cache_dir(&self) -> PathBuf {
+    fn file_cache_dir(&self) -> PathBuf {
         Path::new(self.h().root()).join("var/cache/pacman/files")
     }
 
@@ -117,28 +165,44 @@ impl Napm {
             .map_err(|e| anyhow!("sync failed: {e}"))
     }
 
-    pub fn install(&mut self, pkg_names: &[&str]) -> Result<()> {
+    pub fn pkgs(&self, names: &[&str]) -> Vec<Result<Pkg>> {
+        let mut result = Vec::new();
+
+        for name in names {
+            let mut found = None;
+
+            for db in self.h().syncdbs() {
+                match db.pkg(*name) {
+                    Ok(pkg) => {
+                        found = Some(Ok(Pkg::from(pkg)));
+                        break;
+                    }
+                    Err(_) => continue,
+                }
+            }
+
+            if let Some(pkg) = found {
+                result.push(pkg);
+            } else {
+                result.push(Err(anyhow!("package '{name}' not found")));
+            }
+        }
+
+        result
+    }
+
+    pub fn install_pkgs(&mut self, pkgs: &[Pkg]) -> Result<()> {
         let handle = self.h_mut();
 
         handle
             .trans_init(TransFlag::NONE)
             .map_err(|e| anyhow!("failed to initialize transaction: {e}"))?;
 
-        for pkg_name in pkg_names {
-            let pkg = handle
-                .syncdbs()
-                .iter()
-                .find_map(|db| db.pkg(*pkg_name).ok())
-                .ok_or_else(|| anyhow!("package '{pkg_name}' not found"))?;
-
-            println!(
-                "[TRACE] Installing {}/{}",
-                pkg.db().unwrap().name(),
-                pkg.name()
-            );
+        for pkg in pkgs {
+            let package = pkg.clone().into_package_ref(handle)?;
 
             handle
-                .trans_add_pkg(pkg)
+                .trans_add_pkg(package)
                 .map_err(|e| anyhow!("failed to add package to transaction: {e}"))?;
         }
 
@@ -193,7 +257,7 @@ impl Napm {
 
                     // TODO: key reinit
 
-                    return self.install(pkg_names);
+                    return self.install_pkgs(pkgs);
                 }
                 _ => {
                     eprintln!("[{ANSI_BLUE}TRACE{ANSI_RESET}] Install commit error: {e:?}");
@@ -264,17 +328,14 @@ impl Napm {
         Ok(out.into_iter().map(Pkg::from).collect())
     }
 
-    fn unarchive_files_db(
-        archive_path: &std::path::Path,
-        extract_to: &std::path::Path,
-    ) -> anyhow::Result<()> {
+    fn unarchive_files_db(archive_path: &Path, extract_to: &Path) -> anyhow::Result<()> {
         let mut archive = ReadArchive::open(archive_path)
             .map_err(|e| anyhow::anyhow!("failed to open archive: {}", e))?;
 
         if extract_to.exists() {
-            std::fs::remove_dir_all(extract_to)?;
+            fs::remove_dir_all(extract_to)?;
         }
-        std::fs::create_dir_all(extract_to)?;
+        fs::create_dir_all(extract_to)?;
 
         while let Some(entry) = archive.next_entry()? {
             let entry_path = entry.pathname().unwrap_or_default().to_string();
@@ -289,27 +350,24 @@ impl Napm {
 
             match ftype {
                 libarchive2::FileType::Directory => {
-                    std::fs::create_dir_all(&full_path)?;
+                    fs::create_dir_all(&full_path)?;
                 }
                 libarchive2::FileType::RegularFile => {
                     if let Some(parent) = full_path.parent() {
-                        std::fs::create_dir_all(parent)?;
+                        fs::create_dir_all(parent)?;
                     }
 
                     let entry_data = archive
                         .read_data_to_vec()
                         .map_err(|e| anyhow::anyhow!("failed to read data: {}", e))?;
 
-                    let mut writer = std::fs::File::create(&full_path)?;
+                    let mut writer = fs::File::create(&full_path)?;
                     writer.write_all(&entry_data)?;
 
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(
-                            &full_path,
-                            std::fs::Permissions::from_mode(mode),
-                        )?;
+                        fs::set_permissions(&full_path, fs::Permissions::from_mode(mode))?;
                     }
                 }
                 _ => continue,
@@ -319,8 +377,13 @@ impl Napm {
         Ok(())
     }
 
-    pub fn query(&mut self, file: &str, fetch: bool) -> Result<Vec<(Pkg, String)>> {
-        let cache_dir = self.cache_dir();
+    pub fn query(&mut self, file: &str, mut fetch: bool) -> Result<Vec<(Pkg, String)>> {
+        let cache_dir = self.file_cache_dir();
+
+        if !cache_dir.exists() {
+            println!("[{ANSI_BLUE}INFO{ANSI_RESET}] File listing not found, fetching");
+            fetch = true;
+        }
 
         if fetch {
             let h = self.h_mut();
@@ -340,15 +403,15 @@ impl Napm {
                         let db_cache_dir = cache_dir.join(db_name);
 
                         let should_update = if db_cache_dir.exists() {
-                            let sync_mtime = std::fs::metadata(&path)?.modified()?;
-                            let cache_mtime = std::fs::metadata(&db_cache_dir)?.modified()?;
+                            let sync_mtime = fs::metadata(&path)?.modified()?;
+                            let cache_mtime = fs::metadata(&db_cache_dir)?.modified()?;
                             sync_mtime > cache_mtime
                         } else {
                             true
                         };
 
                         if should_update {
-                            std::fs::create_dir_all(&db_cache_dir)?;
+                            fs::create_dir_all(&db_cache_dir)?;
 
                             Self::unarchive_files_db(&path, &db_cache_dir)
                                 .map_err(|e| anyhow!("failed to unarchive {}: {}", filename, e))?;
@@ -365,7 +428,7 @@ impl Napm {
 
         let mut out = Vec::new();
 
-        for db_entry in std::fs::read_dir(&cache_dir)? {
+        for db_entry in fs::read_dir(&cache_dir)? {
             let db_entry = db_entry?;
             let db_cache_dir = db_entry.path();
 
@@ -375,7 +438,7 @@ impl Napm {
 
             let db_name = db_entry.file_name().to_string_lossy().to_string();
 
-            for pkg_entry in std::fs::read_dir(&db_cache_dir)? {
+            for pkg_entry in fs::read_dir(&db_cache_dir)? {
                 let pkg_entry = pkg_entry?;
                 let pkg_path = pkg_entry.path();
 
@@ -390,7 +453,7 @@ impl Napm {
                 let mut pkg_desc = String::new();
 
                 if desc_path.exists() {
-                    let content = std::fs::read_to_string(&desc_path)?;
+                    let content = fs::read_to_string(&desc_path)?;
                     let mut current_key: Option<&str> = None;
 
                     for line in content.lines() {
@@ -430,7 +493,7 @@ impl Napm {
                     continue;
                 }
 
-                let files_content = std::fs::read_to_string(&files_path)?;
+                let files_content = fs::read_to_string(&files_path)?;
                 for line in files_content.lines() {
                     if line.starts_with('%') || line.trim().is_empty() {
                         continue;
@@ -503,16 +566,6 @@ fn download_callback(
     ev: AnyDownloadEvent,
     bars: &mut Arc<Mutex<(MultiProgress, HashMap<String, ProgressBar>)>>,
 ) {
-    let style =
-        ProgressStyle::with_template("[{elapsed:>3}] [{bar:40.cyan/blue}] {percent:>3}% {msg}")
-            .unwrap()
-            .progress_chars("#>-");
-
-    let style_failed =
-        ProgressStyle::with_template("[{elapsed:>3}] [{bar:40.red/blue}] {percent:>3}% {msg}")
-            .unwrap()
-            .progress_chars("#>-");
-
     match ev.event() {
         DownloadEvent::Init(_) => {
             let mut bars_guard = bars.lock().unwrap();
@@ -520,7 +573,7 @@ fn download_callback(
 
             if let std::collections::hash_map::Entry::Vacant(e) = bar_map.entry(file.to_string()) {
                 let pb = mp.add(ProgressBar::new(100));
-                pb.set_style(style.clone());
+                pb.set_style(progress_bar_style(false).clone());
                 pb.set_message(file.to_string());
                 e.insert(pb);
             }
@@ -548,7 +601,7 @@ fn download_callback(
                         pb.finish_with_message(format!("{file} up to date"))
                     }
                     DownloadResult::Failed => {
-                        pb.set_style(style_failed.clone());
+                        pb.set_style(progress_bar_style(true).clone());
                         pb.finish_with_message(format!("{file} failed"));
                     }
                 }
@@ -559,26 +612,27 @@ fn download_callback(
     }
 }
 
-// fn progress_callback(
-//     progress: Progress,
-//     file: &str,
-//     _percent: i32,
-//     _howmany: usize,
-//     _current: usize,
-//     _: &mut (),
-// ) {
-//     println!("{progress:?} {file}");
+fn progress_callback(
+    progress: Progress,
+    file: &str,
+    percent: i32,
+    how_many: usize,
+    current: usize,
+    bars: &mut Arc<Mutex<(MultiProgress, HashMap<String, ProgressBar>)>>,
+) {
+    let mut bars_guard = bars.lock().unwrap();
+    let (mp, bar_map) = &mut *bars_guard;
 
-//     match progress {
-//         Progress::AddStart => {}
-//         Progress::UpgradeStart => {}
-//         Progress::DowngradeStart => {}
-//         Progress::ReinstallStart => {}
-//         Progress::RemoveStart => {}
-//         Progress::ConflictsStart => {}
-//         Progress::DiskspaceStart => {}
-//         Progress::IntegrityStart => {}
-//         Progress::LoadStart => {}
-//         Progress::KeyringStart => {}
-//     }
-// }
+    if let std::collections::hash_map::Entry::Vacant(e) = bar_map.entry(file.to_string()) {
+        let pb = mp.add(ProgressBar::new(100));
+        pb.set_style(progress_bar_style(false).clone());
+        pb.set_message(file.to_string());
+
+        e.insert(pb);
+    }
+
+    let pb: &mut ProgressBar = bar_map.get_mut(file).unwrap();
+
+    pb.set_length(percent as u64);
+    pb.set_message(format!("{file} {:?} {}/{}", progress, current, how_many));
+}
