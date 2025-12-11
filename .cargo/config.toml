@@ -1,5 +1,0 @@
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-lb2"]
-
-[target.x86_64-pc-linux-gnu]
-rustflags = ["-C", "link-arg=-lb2"]

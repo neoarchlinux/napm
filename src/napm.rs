@@ -2,16 +2,16 @@ use alpm::{
     Alpm, AnyDownloadEvent, DownloadEvent, DownloadEventCompleted, DownloadEventProgress,
     DownloadResult, Error as AlpmErr, Package, Progress, SigLevel, TransFlag, Usage,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use libarchive2::ReadArchive;
 use std::{
     collections::HashMap,
-    fs,
-    io::Write,
+    fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
+use tar::Archive;
+use zstd::stream::read::Decoder;
 
 use crate::ansi::*;
 
@@ -110,6 +110,10 @@ impl Napm {
                 ][..],
                 &["core", "extra", "multilib"][..],
             ),
+            // (
+            //     &["http://localhost:8080/$repo/os/$arch"][..],
+            //     &["matrix"][..],
+            // ),
         ];
 
         for (url_fmts, names) in &dbs {
@@ -328,49 +332,57 @@ impl Napm {
         Ok(out.into_iter().map(Pkg::from).collect())
     }
 
-    fn unarchive_files_db(archive_path: &Path, extract_to: &Path) -> anyhow::Result<()> {
-        let mut archive = ReadArchive::open(archive_path)
-            .map_err(|e| anyhow::anyhow!("failed to open archive: {}", e))?;
+    pub fn unarchive_files_db(archive_path: &Path, extract_to: &Path) -> anyhow::Result<()> {
+        let file = fs::File::open(archive_path)
+            .with_context(|| format!("failed to open archive: {}", archive_path.display()))?;
+
+        let decoder = Decoder::new(file).context("failed to create zstd decoder")?;
+
+        let mut archive = Archive::new(decoder);
 
         if extract_to.exists() {
-            fs::remove_dir_all(extract_to)?;
+            fs::remove_dir_all(extract_to)
+                .with_context(|| format!("failed to delete {}", extract_to.display()))?;
         }
+
         fs::create_dir_all(extract_to)?;
 
-        while let Some(entry) = archive.next_entry()? {
-            let entry_path = entry.pathname().unwrap_or_default().to_string();
-            if entry_path.is_empty() || entry_path == "." {
+        for entry_result in archive.entries()? {
+            let mut entry = entry_result?;
+
+            let entry_path = match entry.path() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            if entry_path.as_os_str().is_empty() || entry_path == Path::new(".") {
                 continue;
             }
 
-            let mode = entry.mode();
-            let ftype = entry.file_type();
-
             let full_path = extract_to.join(&entry_path);
 
-            match ftype {
-                libarchive2::FileType::Directory => {
-                    fs::create_dir_all(&full_path)?;
+            if entry.header().entry_type().is_dir() {
+                fs::create_dir_all(&full_path)?;
+                continue;
+            }
+
+            if entry.header().entry_type().is_file() {
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent)?;
                 }
-                libarchive2::FileType::RegularFile => {
-                    if let Some(parent) = full_path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
 
-                    let entry_data = archive
-                        .read_data_to_vec()
-                        .map_err(|e| anyhow::anyhow!("failed to read data: {}", e))?;
+                let mut outfile = fs::File::create(&full_path)?;
+                io::copy(&mut entry, &mut outfile)?;
 
-                    let mut writer = fs::File::create(&full_path)?;
-                    writer.write_all(&entry_data)?;
-
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(mode) = entry.header().mode() {
                         fs::set_permissions(&full_path, fs::Permissions::from_mode(mode))?;
                     }
                 }
-                _ => continue,
+
+                continue;
             }
         }
 

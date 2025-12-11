@@ -17,12 +17,15 @@ makedepends=(rust cargo clang pkgconf)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
+binary='napm'
+target='x86_64-unknown-linux-gnu'
+
 build() {
     cd "$pkgname-$pkgver"
-    cargo build --release --locked
+    cargo build --release --locked --target $target
 }
 
 package() {
     cd "$pkgname-$pkgver"
-    install -Dm755 target/release/$pkgname "$pkgdir/usr/bin/$pkgname"
+    install -Dm755 target/$target/release/$binary "$pkgdir/usr/bin/$binary"
 }
