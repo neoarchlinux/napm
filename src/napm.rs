@@ -5,6 +5,7 @@ use alpm::{
 use anyhow::{Result, anyhow};
 use flate2::read::GzDecoder;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use pacmanconf::Config;
 use std::{
     collections::HashMap,
     fs,
@@ -83,59 +84,91 @@ impl From<&Package> for Pkg {
     }
 }
 
+fn parse_siglevel(values: &[String]) -> Result<SigLevel> {
+    let mut level = SigLevel::empty();
+
+    for v in values {
+        match v.as_str() {
+            "Never" => level |= SigLevel::NONE,
+
+            "PackageOptional" => level |= SigLevel::PACKAGE_OPTIONAL,
+            "PackageRequired" => level |= SigLevel::PACKAGE,
+            "PackageTrustedOnly" => level |= SigLevel::PACKAGE_MARGINAL_OK,
+
+            "DatabaseOptional" => level |= SigLevel::DATABASE_OPTIONAL,
+            "DatabaseRequired" => level |= SigLevel::DATABASE,
+            "DatabaseTrustedOnly" => level |= SigLevel::DATABASE_MARGINAL_OK,
+
+            "UseDefault" => level |= SigLevel::USE_DEFAULT,
+
+            other => {
+                return Err(anyhow!("unknown SigLevel value: {other}"));
+            }
+        }
+    }
+
+    Ok(level)
+}
+
 pub struct Napm {
     handle: Option<Alpm>,
 }
 
 impl Napm {
-    pub fn new(root: &str) -> Result<Self> {
-        let dbpath = format!("{root}/var/lib/pacman"); // TODO: maybe change "pacman" to "napm"
+    pub fn new() -> Result<Self> {
+        let cfg = Config::new()?;
 
-        let mut handle = Alpm::new(root, &dbpath) //
-            .map_err(|e| anyhow!("failed to initialize alpm: {e}"))?;
+        let root_dir: Vec<u8> = cfg.root_dir.clone().into();
+        let db_path: Vec<u8> = cfg.db_path.into();
 
-        // TODO: get from config
-        let dbs = [
-            (
-                &[
-                    "https://artix.sakamoto.pl/$repo/os/$arch",
-                    "https://mirrors.dotsrc.org/artix-linux/repos/$repo/os/$arch",
-                ][..],
-                &["system", "world", "galaxy"][..],
-            ),
-            (
-                &[
-                    "https://arch.sakamoto.pl/$repo/os/$arch",
-                    "https://mirror.pkgbuild.com/$repo/os/$arch",
-                ][..],
-                &["core", "extra", "multilib"][..],
-            ),
-            // (
-            //     &["http://localhost:8080/$repo/os/$arch"][..],
-            //     &["matrix"][..],
-            // ),
-        ];
+        let mut handle =
+            Alpm::new(root_dir, db_path).map_err(|e| anyhow!("failed to initialize alpm: {e}"))?;
 
-        for (url_fmts, names) in &dbs {
-            for &name in names.iter() {
-                let db = handle.register_syncdb_mut(
-                    name,
-                    SigLevel::USE_DEFAULT | SigLevel::DATABASE_OPTIONAL,
-                )?;
+        let arch = cfg.architecture.first().map(String::as_str).unwrap();
 
-                for url_fmt in *url_fmts {
-                    let url = url_fmt.replace("$repo", name).replace("$arch", "x86_64");
-                    db.add_server(url)?;
-                }
-
-                db.set_usage(Usage::all())?;
+        for dir in &cfg.cache_dir {
+            let path: Vec<u8> = if dir.starts_with('/') {
+                format!("{}{}", &cfg.root_dir, &dir)
+            } else {
+                format!("{}/{}", &cfg.root_dir, &dir)
             }
+            .into();
+
+            handle.add_cachedir(path)?;
         }
 
-        handle.add_cachedir(format!("{root}/var/cache/pacman/pkg").as_str())?;
+        handle.set_check_space(cfg.check_space);
 
-        handle.set_check_space(true);
-        handle.set_parallel_downloads(5);
+        if cfg.parallel_downloads > 0 {
+            handle.set_parallel_downloads(cfg.parallel_downloads as u32);
+        }
+
+        let local_siglevel = parse_siglevel(&cfg.local_file_sig_level)?;
+        let remote_siglevel = parse_siglevel(&cfg.remote_file_sig_level)?;
+
+        handle.set_local_file_siglevel(local_siglevel)?;
+        handle.set_remote_file_siglevel(remote_siglevel)?;
+
+        for repo in &cfg.repos {
+            let siglevel = if repo.sig_level.is_empty() {
+                remote_siglevel
+            } else {
+                parse_siglevel(&repo.sig_level)?
+            };
+
+            let name: Vec<u8> = repo.clone().name.into();
+            let db = handle.register_syncdb_mut(name, siglevel)?;
+
+            for server in &repo.servers {
+                let url = server.replace("$repo", &repo.name).replace("$arch", arch);
+                db.add_server(url)?;
+            }
+
+            db.set_usage(Usage::all())?; // TODO: from config?
+        }
+
+        let gpg_dir: Vec<u8> = cfg.gpg_dir.into();
+        handle.set_gpgdir(gpg_dir)?;
 
         let download_progress = Arc::new(Mutex::new((MultiProgress::new(), HashMap::new())));
         handle.set_dl_cb(download_progress, download_callback);
@@ -313,10 +346,10 @@ impl Napm {
             h.trans_remove_pkg(pkg)?;
         }
 
-        h.trans_prepare() //
+        h.trans_prepare()
             .map_err(|e| anyhow!("failed to prepare transaction: {e}"))?;
 
-        h.trans_commit() //
+        h.trans_commit()
             .map_err(|e| anyhow!("failed to commit transaction: {e}"))?;
 
         Ok(())

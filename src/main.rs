@@ -20,8 +20,8 @@ use napm::Napm;
 #[command(name = "napm")]
 #[command(about = "NeoArch Package Manager")]
 struct Cli {
-    #[arg(long, global = true)]
-    root: Option<String>,
+    // #[arg(long, global = true)]
+    // root: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -63,7 +63,7 @@ enum Commands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let mut napm = Napm::new(&cli.root.unwrap_or("/".to_string()))?;
+    let mut napm = Napm::new()?;
 
     match cli.command {
         Commands::Files { package } => commands::files::run(&napm, &package),

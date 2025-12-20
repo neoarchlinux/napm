@@ -111,6 +111,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cini"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8628d1f5b9a7b1196ce1aa660e3ba7e2559d350649cbe94993519c127df667f2"
+
+[[package]]
 name = "clap"
 version = "4.5.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -298,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "napm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alpm",
  "alpm-sys 4.0.3",
@@ -306,6 +312,7 @@ dependencies = [
  "clap",
  "flate2",
  "indicatif",
+ "pacmanconf",
  "serde",
  "serde_json",
  "tar",
@@ -322,6 +329,15 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "pacmanconf"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1087f8994e545eed9f7453376282f2964f18ca4b739e42f0dc7f2fed246d76c3"
+dependencies = [
+ "cini",
+]
 
 [[package]]
 name = "pkg-config"
