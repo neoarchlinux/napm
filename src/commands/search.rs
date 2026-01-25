@@ -1,16 +1,9 @@
-use anyhow::Result;
-
+use crate::error::Result;
 use crate::ansi::*;
-use crate::napm::{Napm, Pkg};
+use crate::pkg::Pkg;
+use crate::napm::Napm;
 
-pub fn run(napm: &mut Napm, search: &str, sync: bool, num_results: Option<u32>) -> Result<()> {
-    if sync {
-        match napm.sync(false) {
-            Ok(_) => {}
-            Err(e) => eprintln!("\x1b[33mWarning\x1b[0m: using local databases only ({e})"),
-        }
-    }
-
+pub fn run(napm: &mut Napm, search: &str, num_results: Option<u32>) -> Result<()> {
     fn relevance_score(Pkg { name, desc, .. }: Pkg, search: &str) -> f64 {
         let search_lower = search.to_lowercase();
         let name_lower = name.to_lowercase();
@@ -69,24 +62,18 @@ pub fn run(napm: &mut Napm, search: &str, sync: bool, num_results: Option<u32>) 
     for (i, SearchResult { pkg, .. }) in results.iter().enumerate().rev() {
         let indicator = format!("{ANSI_RED}-{ANSI_RESET}");
 
-        if let [f_db_name, f_name] = pkg
-            .formatted_name()
-            .split('/')
-            .collect::<Vec<_>>()
-            .as_slice()
-        {
-            let name = highlight(f_name, search, ANSI_CYAN);
-            let desc = highlight(&pkg.desc, search, ANSI_WHITE);
-            let version = &pkg.version;
+        let f_name = &pkg.name;
+        let f_db_name = &pkg.db_name;
 
-            let n = i + 1;
+        let name = highlight(f_name, search, ANSI_CYAN);
+        let desc = highlight(&pkg.desc, search, ANSI_WHITE);
+        let version = &pkg.version;
 
-            println!(
-                " {indicator} {ANSI_YELLOW}[{ANSI_BOLD}{n}{ANSI_RESET}{ANSI_YELLOW}]{ANSI_RESET} {ANSI_CYAN}{f_db_name}{ANSI_WHITE}/{name} {ANSI_MAGENTA}{version}{ANSI_RESET} {desc}"
-            );
-        } else {
-            panic!();
-        }
+        let n = i + 1;
+
+        println!(
+            " {indicator} {ANSI_YELLOW}[{ANSI_BOLD}{n}{ANSI_RESET}{ANSI_YELLOW}]{ANSI_RESET} {ANSI_CYAN}{f_db_name}{ANSI_WHITE}/{name} {ANSI_MAGENTA}{version}{ANSI_RESET} {desc}"
+        );
     }
 
     Ok(())

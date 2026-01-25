@@ -1,113 +1,58 @@
 use alpm::{
-    Alpm, AnyDownloadEvent, DownloadEvent, DownloadEventCompleted, DownloadEventProgress,
-    DownloadResult, Error as AlpmErr, Package, Progress, SigLevel, TransFlag, Usage,
+    Alpm, AnyEvent, AnyQuestion, AnyDownloadEvent, DownloadEvent, DownloadEventCompleted,
+    DownloadEventProgress, DownloadResult, Progress, Usage,
 };
-use anyhow::{Result, anyhow};
-use flate2::read::GzDecoder;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar};
 use pacmanconf::Config;
 use std::{
     collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
+    path::PathBuf,
 };
-use tar::Archive;
 
 use crate::ansi::*;
+use crate::error::{Error, Result};
+use crate::pkg::Pkg;
+use crate::log_fatal;
+use crate::util::{confirm, choose};
 
-static PROGRESS_BAR_STYLE: OnceLock<ProgressStyle> = OnceLock::new();
-static PROGRESS_BAR_STYLE_FAILED: OnceLock<ProgressStyle> = OnceLock::new();
+pub mod actions;
+pub mod auto_repair;
+pub mod util;
+pub mod style;
 
-fn progress_bar_style(failed: bool) -> &'static ProgressStyle {
-    let progress_chars = "=> ";
+// CFG
 
-    if failed {
-        PROGRESS_BAR_STYLE_FAILED.get_or_init(|| {
-            ProgressStyle::with_template("[{elapsed:>3}] [{bar:40.red/blue}] [FAILED] {msg}")
-                .unwrap()
-                .progress_chars(progress_chars)
-        })
-    } else {
-        PROGRESS_BAR_STYLE.get_or_init(|| {
-            ProgressStyle::with_template("[{elapsed:>3}] [{bar:40.cyan/blue}] {percent:>3}% {msg}")
-                .unwrap()
-                .progress_chars(progress_chars)
-        })
-    }
+pub struct ConfigOverride {
+    pub root: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct Pkg {
-    pub name: String,
-    pub version: String,
-    pub db_name: String,
-    pub desc: String,
+// NAPM ERROR DATA
+
+// struct NapmDep {
+//     // TODO
+// }
+
+struct NapmConflict {
+    pkg1: Pkg,
+    pkg2: Pkg,
+    // TODO: reason: NapmDep,
 }
 
-impl Pkg {
-    fn into_package_ref(self, handle: &Alpm) -> Result<&Package> {
-        let expect_msg = format!(
-            "[{ANSI_RED}FATAL{ANSI_RESET}]: package '{}' not found in '{}'",
-            self.name, self.db_name
-        );
-
-        handle
-            .syncdbs()
-            .iter()
-            .find(|db| *db.name() == self.db_name)
-            .expect(&expect_msg)
-            .pkg(self.name)
-            .map_err(|_| anyhow!(expect_msg))
-    }
-
-    pub fn formatted_name(&self) -> String {
-        format!(
-            "{ANSI_BLUE}{}{ANSI_RESET}/{ANSI_CYAN}{}{ANSI_RESET}",
-            self.db_name, self.name,
-        )
-    }
+struct NapmDepMissing {
+    target: String,
+    causing_pkg: Option<String>,
+    // TODO: dep: NapmDep,
 }
 
-impl From<&Package> for Pkg {
-    fn from(package: &Package) -> Self {
-        Self {
-            name: package.name().to_string(),
-            version: package.version().to_string(),
-            db_name: package
-                .db()
-                .map(|db| db.name())
-                .unwrap_or("local")
-                .to_string(),
-            desc: package.desc().unwrap_or("").to_string(),
-        }
-    }
-}
-
-fn parse_siglevel(values: &[String]) -> Result<SigLevel> {
-    let mut level = SigLevel::empty();
-
-    for v in values {
-        match v.as_str() {
-            "Never" => level |= SigLevel::NONE,
-
-            "PackageOptional" => level |= SigLevel::PACKAGE_OPTIONAL,
-            "PackageRequired" => level |= SigLevel::PACKAGE,
-            "PackageTrustedOnly" => level |= SigLevel::PACKAGE_MARGINAL_OK,
-
-            "DatabaseOptional" => level |= SigLevel::DATABASE_OPTIONAL,
-            "DatabaseRequired" => level |= SigLevel::DATABASE,
-            "DatabaseTrustedOnly" => level |= SigLevel::DATABASE_MARGINAL_OK,
-
-            "UseDefault" => level |= SigLevel::USE_DEFAULT,
-
-            other => {
-                return Err(anyhow!("unknown SigLevel value: {other}"));
-            }
-        }
-    }
-
-    Ok(level)
+#[allow(dead_code)]
+enum NapmErrorData {
+    Empty,
+    FileConflict(Vec<NapmConflict>),
+    PkgInvalid(Vec<String>),
+    PkgInvalidArch(Vec<Pkg>),
+    UnsatisfiedDeps(Vec<NapmDepMissing>),
+    ConflictingDeps(Vec<NapmConflict>),
 }
 
 pub struct Napm {
@@ -115,14 +60,53 @@ pub struct Napm {
 }
 
 impl Napm {
-    pub fn new() -> Result<Self> {
-        let cfg = Config::new()?;
+    pub fn cfg(cfg_override: ConfigOverride) -> Result<Config> {
+        let cfg = if let Some(root) = cfg_override.root {
+            use cini::Ini;
+
+            let mut config = Config::default();
+
+            let conf = { // because pacmanconf::Config does not use --sysroot option, but --root, I have to parse pacman-conf output by myself
+                let mut cmd = std::process::Command::new("pacman-conf");
+                
+                cmd.arg("--sysroot").arg(root);
+
+                let output = cmd.output()?;
+
+                if !output.status.success() {
+                    log_fatal!("Your config is incorrect");
+                    for line in String::from_utf8(output.stderr).map_err(|_| Error::ConfigParse)?.lines() {
+                        log_fatal!("    {line}");
+                    }
+                    return Err(Error::ConfigParse);
+                }
+
+                let mut conf = String::from_utf8(output.stdout).map_err(|_| Error::ConfigParse)?;
+                if conf.ends_with('\n') {
+                    conf.pop().unwrap();
+                }
+
+                conf
+            };
+
+            config.parse_str(&conf).map_err(|_| Error::ConfigParse)?;
+
+            Ok(config)
+        } else {
+            Config::new()
+        }
+        .map_err(|_| Error::ConfigParse)?;
+
+        Ok(cfg)
+    }
+
+    pub fn new(cfg_override: ConfigOverride) -> Result<Self> {
+        let cfg = Self::cfg(cfg_override)?;
 
         let root_dir: Vec<u8> = cfg.root_dir.clone().into();
         let db_path: Vec<u8> = cfg.db_path.into();
 
-        let mut handle =
-            Alpm::new(root_dir, db_path).map_err(|e| anyhow!("failed to initialize alpm: {e}"))?;
+        let mut handle = Alpm::new(root_dir, db_path)?;
 
         let arch = cfg.architecture.first().map(String::as_str).unwrap();
 
@@ -143,8 +127,8 @@ impl Napm {
             handle.set_parallel_downloads(cfg.parallel_downloads as u32);
         }
 
-        let local_siglevel = parse_siglevel(&cfg.local_file_sig_level)?;
-        let remote_siglevel = parse_siglevel(&cfg.remote_file_sig_level)?;
+        let local_siglevel = Self::parse_siglevel(&cfg.local_file_sig_level)?;
+        let remote_siglevel = Self::parse_siglevel(&cfg.remote_file_sig_level)?;
 
         handle.set_local_file_siglevel(local_siglevel)?;
         handle.set_remote_file_siglevel(remote_siglevel)?;
@@ -153,7 +137,7 @@ impl Napm {
             let siglevel = if repo.sig_level.is_empty() {
                 remote_siglevel
             } else {
-                parse_siglevel(&repo.sig_level)?
+                Self::parse_siglevel(&repo.sig_level)?
             };
 
             let name: Vec<u8> = repo.clone().name.into();
@@ -167,399 +151,37 @@ impl Napm {
             db.set_usage(Usage::all())?; // TODO: from config?
         }
 
+        {
+            let mut path = PathBuf::new();
+            path.push(cfg.root_dir);
+            path.push("/usr/share/libalpm/hooks");
+            handle.add_hookdir(path.display().to_string())?;
+        }
+        
+        for hook_dir in cfg.hook_dir {
+            handle.add_hookdir(hook_dir)?;
+        }
+
         let gpg_dir: Vec<u8> = cfg.gpg_dir.into();
         handle.set_gpgdir(gpg_dir)?;
+
+        // callbacks
 
         let download_progress = Arc::new(Mutex::new((MultiProgress::new(), HashMap::new())));
         handle.set_dl_cb(download_progress, download_callback);
 
+        handle.set_event_cb((), event_callback);
+
         let other_progress = Arc::new(Mutex::new((MultiProgress::new(), HashMap::new())));
         handle.set_progress_cb(other_progress, progress_callback);
+
+        handle.set_question_cb((), question_callback);
+
+        // TODO: handle.set_fetch_cb
 
         Ok(Self {
             handle: Some(handle),
         })
-    }
-
-    fn h(&self) -> &Alpm {
-        self.handle.as_ref().unwrap()
-    }
-
-    fn h_mut(&mut self) -> &mut Alpm {
-        self.handle.as_mut().unwrap()
-    }
-
-    fn file_cache_dir(&self) -> PathBuf {
-        Path::new(self.h().root()).join("var/cache/pacman/files")
-    }
-
-    pub fn sync(&mut self, force: bool) -> Result<bool> {
-        let handle = self.h_mut();
-
-        handle
-            .syncdbs_mut()
-            .update(force)
-            .map_err(|e| anyhow!("sync failed: {e}"))
-    }
-
-    pub fn pkgs(&self, names: &[&str]) -> Vec<Result<Pkg>> {
-        let mut result = Vec::new();
-
-        for name in names {
-            let mut found = None;
-
-            for db in self.h().syncdbs() {
-                match db.pkg(*name) {
-                    Ok(pkg) => {
-                        found = Some(Ok(Pkg::from(pkg)));
-                        break;
-                    }
-                    Err(_) => continue,
-                }
-            }
-
-            if let Some(pkg) = found {
-                result.push(pkg);
-            } else {
-                result.push(Err(anyhow!("package '{name}' not found")));
-            }
-        }
-
-        result
-    }
-
-    pub fn install_pkgs(&mut self, pkgs: &[Pkg]) -> Result<()> {
-        let handle = self.h_mut();
-
-        handle
-            .trans_init(TransFlag::NONE)
-            .map_err(|e| anyhow!("failed to initialize transaction: {e}"))?;
-
-        for pkg in pkgs {
-            let package = pkg.clone().into_package_ref(handle)?;
-
-            handle
-                .trans_add_pkg(package)
-                .map_err(|e| anyhow!("failed to add package to transaction: {e}"))?;
-        }
-
-        handle
-            .trans_prepare()
-            .map_err(|e| anyhow!("failed to prepare transaction: {e}"))?;
-
-        let commit_result = handle.trans_commit();
-
-        match &commit_result {
-            Ok(()) => {}
-            Err(e) => match e.error() {
-                AlpmErr::PkgInvalid => {
-                    eprintln!(
-                        "[{ANSI_MAGENTA}AUTO REPAIR{ANSI_RESET}] invalid package detected - running automatic repair"
-                    );
-
-                    for cachedir in handle.cachedirs().iter() {
-                        eprintln!(
-                            "[{ANSI_MAGENTA}AUTO REPAIR{ANSI_RESET}] removing broken cache entries from {cachedir}"
-                        );
-
-                        let mut removed = 0;
-
-                        let cache_path = Path::new(cachedir);
-
-                        if let Ok(entries) = fs::read_dir(cache_path) {
-                            for entry in entries.flatten() {
-                                let path = entry.path();
-
-                                fs::remove_file(&path)?;
-                                removed += 1;
-                            }
-                        }
-
-                        eprintln!(
-                            "[{ANSI_MAGENTA}AUTO REPAIR{ANSI_RESET}] removed {removed} cache entries from {cachedir}"
-                        );
-                    }
-
-                    handle
-                        .trans_release()
-                        .map_err(|e| anyhow!("failed to release transaction: {e}"))?;
-
-                    eprintln!(
-                        "[{ANSI_MAGENTA}AUTO REPAIR{ANSI_RESET}] updating the package database"
-                    );
-
-                    handle.syncdbs_mut().update(true)?;
-
-                    eprintln!("[{ANSI_MAGENTA}AUTO REPAIR{ANSI_RESET}] updated");
-
-                    // TODO: key reinit
-
-                    return self.install_pkgs(pkgs);
-                }
-                _ => {
-                    eprintln!("[{ANSI_BLUE}TRACE{ANSI_RESET}] Install commit error: {e:?}");
-                    commit_result.map_err(|e| anyhow!("failed to commit transaction: {e}"))?
-                }
-            },
-        }
-
-        Ok(())
-    }
-
-    pub fn update(&mut self) -> Option<Result<()>> {
-        let h = self.h_mut();
-
-        if let Err(e) = h.syncdbs_mut().update(true) {
-            return Some(Err(anyhow!("failed to refresh dbs: {e}")));
-        }
-
-        if let Err(e) = h.trans_init(TransFlag::NONE) {
-            return Some(Err(anyhow!("failed to initialize transaction: {e}")));
-        }
-
-        if let Err(e) = h.sync_sysupgrade(false) {
-            return Some(Err(anyhow!("failed to upgrade: {e}")));
-        }
-
-        if let Err(e) = h.trans_prepare() {
-            return Some(Err(anyhow!("failed to prepare transaction: {e}")));
-        }
-
-        match h.trans_commit() {
-            Err(e) if e.to_string().contains("not prepared") => None,
-            Err(e) => Some(Err(anyhow!("failed to commit transaction: {e}"))),
-            _ => Some(Ok(())),
-        }
-    }
-
-    pub fn remove(&mut self, names: &[&str], deep: bool) -> Result<()> {
-        let h = self.h_mut();
-
-        h.trans_init(if deep {
-            TransFlag::RECURSE | TransFlag::CASCADE | TransFlag::NO_SAVE
-        } else {
-            TransFlag::NONE
-        })?;
-
-        for n in names {
-            let pkg = h.localdb().pkg(*n)?;
-            h.trans_remove_pkg(pkg)?;
-        }
-
-        h.trans_prepare()
-            .map_err(|e| anyhow!("failed to prepare transaction: {e}"))?;
-
-        h.trans_commit()
-            .map_err(|e| anyhow!("failed to commit transaction: {e}"))?;
-
-        Ok(())
-    }
-
-    pub fn search(&self, needles: &[&str]) -> Result<Vec<Pkg>> {
-        let mut out = Vec::new();
-
-        for db in self.h().syncdbs() {
-            out.extend(db.search(needles.iter())?);
-        }
-
-        Ok(out.into_iter().map(Pkg::from).collect())
-    }
-
-    fn unarchive_files_db(archive_path: &Path, extract_to: &Path) -> Result<()> {
-        if extract_to.exists() {
-            fs::remove_dir_all(extract_to)?;
-        }
-        fs::create_dir_all(extract_to)?;
-
-        let file = fs::File::open(archive_path)
-            .map_err(|e| anyhow!("failed to open archive {}: {}", archive_path.display(), e))?;
-        let decoder = GzDecoder::new(file);
-        let mut archive = Archive::new(decoder);
-
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            let path = entry.path()?.to_path_buf();
-            if path.as_os_str().is_empty() || path == Path::new(".") {
-                continue;
-            }
-            entry.unpack_in(extract_to)?;
-        }
-
-        Ok(())
-    }
-
-    pub fn query(&mut self, file: &str, mut fetch: bool) -> Result<Vec<(Pkg, String)>> {
-        let cache_dir = self.file_cache_dir();
-
-        if !cache_dir.exists() {
-            println!("[{ANSI_BLUE}INFO{ANSI_RESET}] File listing not found, fetching");
-            fetch = true;
-        }
-
-        if fetch {
-            let h = self.h_mut();
-
-            let db_path = Path::new(h.dbpath());
-            let sync_dir = db_path.join("sync");
-
-            if sync_dir.exists() {
-                for entry in fs::read_dir(&sync_dir)? {
-                    let entry = entry?;
-                    let path = entry.path();
-
-                    if let Some(filename) = path.file_name().and_then(|n| n.to_str())
-                        && filename.ends_with(".files")
-                    {
-                        let db_name = filename.trim_end_matches(".files");
-                        let db_cache_dir = cache_dir.join(db_name);
-
-                        let should_update = if db_cache_dir.exists() {
-                            let sync_mtime = fs::metadata(&path)?.modified()?;
-                            let cache_mtime = fs::metadata(&db_cache_dir)?.modified()?;
-                            sync_mtime > cache_mtime
-                        } else {
-                            true
-                        };
-
-                        if should_update {
-                            fs::create_dir_all(&db_cache_dir)?;
-
-                            Self::unarchive_files_db(&path, &db_cache_dir)
-                                .map_err(|e| anyhow!("failed to unarchive {}: {}", filename, e))?;
-                        }
-                    }
-                }
-            }
-
-            h.set_dbext(".files");
-            h.syncdbs_mut()
-                .update(false)
-                .map_err(|e| anyhow!("failed to refresh dbs: {e}"))?;
-        }
-
-        let mut out = Vec::new();
-
-        for db_entry in fs::read_dir(&cache_dir)? {
-            let db_entry = db_entry?;
-            let db_cache_dir = db_entry.path();
-
-            if !db_cache_dir.is_dir() {
-                continue;
-            }
-
-            let db_name = db_entry.file_name().to_string_lossy().to_string();
-
-            for pkg_entry in fs::read_dir(&db_cache_dir)? {
-                let pkg_entry = pkg_entry?;
-                let pkg_path = pkg_entry.path();
-
-                if !pkg_path.is_dir() {
-                    continue;
-                }
-
-                let desc_path = pkg_path.join("desc");
-
-                let mut pkg_name = String::new();
-                let mut pkg_version = String::new();
-                let mut pkg_desc = String::new();
-
-                if desc_path.exists() {
-                    let content = fs::read_to_string(&desc_path)?;
-                    let mut current_key: Option<&str> = None;
-
-                    for line in content.lines() {
-                        let line = line.trim();
-                        if line.is_empty() {
-                            continue;
-                        }
-
-                        if line.starts_with('%') && line.ends_with('%') {
-                            current_key = Some(line.trim_matches('%'));
-                            continue;
-                        }
-
-                        match current_key {
-                            Some("NAME") => pkg_name = line.to_string(),
-                            Some("VERSION") => pkg_version = line.to_string(),
-                            Some("DESC") => {
-                                if pkg_desc.is_empty() {
-                                    pkg_desc = line.to_string();
-                                } else {
-                                    pkg_desc.push(' ');
-                                    pkg_desc.push_str(line);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                } else {
-                    let dir_name = pkg_entry.file_name().to_string_lossy().to_string();
-                    let mut parts = dir_name.rsplitn(2, '-');
-                    pkg_version = parts.next().unwrap_or("").to_string();
-                    pkg_name = parts.next().unwrap_or(&dir_name).to_string();
-                }
-
-                let files_path = pkg_path.join("files");
-                if !files_path.exists() {
-                    continue;
-                }
-
-                let files_content = fs::read_to_string(&files_path)?;
-                for line in files_content.lines() {
-                    if line.starts_with('%') || line.trim().is_empty() {
-                        continue;
-                    }
-
-                    if line.ends_with(&format!("/{file}")) {
-                        out.push((
-                            Pkg {
-                                name: pkg_name.clone(),
-                                version: pkg_version.clone(),
-                                db_name: db_name.clone(),
-                                desc: pkg_desc.clone(),
-                            },
-                            line.to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-
-        Ok(out)
-    }
-
-    pub fn info(&self, name: &str) -> Result<Pkg> {
-        let local_pkg = self.h().localdb().pkg(name);
-
-        if let Ok(pkg) = local_pkg {
-            return Ok(Pkg::from(pkg));
-        }
-
-        unimplemented!("non-local info");
-    }
-
-    pub fn list(&self) -> Vec<Pkg> {
-        self.h()
-            .localdb()
-            .pkgs()
-            .into_iter()
-            .map(Pkg::from)
-            .collect()
-    }
-
-    pub fn files(&self, name: &str) -> Result<Vec<String>> {
-        let local_pkg = self.h().localdb().pkg(name);
-
-        if let Ok(pkg) = local_pkg {
-            return Ok(pkg
-                .files()
-                .files()
-                .iter()
-                .map(|f| String::from_utf8(f.name().into()).unwrap())
-                .collect());
-        }
-
-        unimplemented!("non-local files");
     }
 }
 
@@ -569,6 +191,82 @@ impl Drop for Napm {
             let _ = h.unlock();
             let _ = h.release();
         }
+    }
+}
+
+fn event_callback(
+    ev: AnyEvent,
+    _: &mut (),
+) {
+    crate::log_debug!("{:?}", ev.event()); // TODO: handle accordingly
+}
+
+fn question_callback(
+    q: AnyQuestion,
+    _: &mut (),
+) {
+    use alpm::Question as Q;
+    use std::path::Path;
+
+    match q.question() {
+        Q::Conflict(mut x) => {
+            let pkg_a = x.conflict().package1().name();
+            let pkg_b = x.conflict().package2().name();
+            let prompt = format!("Conflict between {ANSI_CYAN}{pkg_a}{ANSI_RESET} and {ANSI_CYAN}{pkg_b}{ANSI_RESET}; Remove {ANSI_RED}{pkg_b}{ANSI_RESET}?");
+
+            match confirm(&prompt, true) {
+                Ok(ans) => x.set_remove(ans),
+                Err(err) => err.die(),
+            }
+        }
+        Q::Replace(x) => {
+            let old = x.oldpkg().name();
+            let new = x.newpkg().name();
+            let prompt = format!("Replace package {ANSI_CYAN}{old} with {ANSI_CYAN}{new}?");
+
+            match confirm(&prompt, true) {
+                Ok(ans) => x.set_replace(ans),
+                Err(err) => err.die(),
+            }
+        }
+        Q::Corrupted(mut x) => {
+            let filepath = x.filepath();
+            let filename = Path::new(filepath).file_name().unwrap().to_str().unwrap();
+            let reason = x.reason();
+            let prompt = format!("File {ANSI_MAGENTA}{filename}{ANSI_RESET} is corrupted: {reason}. Remove package?");
+
+            match confirm(&prompt, true) {
+                Ok(ans) => x.set_remove(ans),
+                Err(err) => err.die(),
+            }
+        }
+        Q::ImportKey(mut x) => {
+            let fingerprint = x.fingerprint();
+            let name = x.uid();
+            let prompt = format!("Import key {ANSI_BOLD}{fingerprint}{ANSI_RESET}, \"{name}\"?");
+
+            match confirm(&prompt, true) {
+                Ok(ans) => x.set_import(ans),
+                Err(err) => err.die(),
+            }
+        }
+        Q::SelectProvider(mut x) => {
+            let dep = x.depend();
+            let name = dep.name();
+            let providers = x.providers()
+                .into_iter()
+                .map(Pkg::from)
+                .map(|pkg| pkg.name)
+                .collect::<Vec<_>>();
+
+            let prompt = format!("There are several providers for {ANSI_MAGENTA}{name}{ANSI_RESET} and you must choose one");
+
+            match choose(&prompt, providers.as_slice(), 0) {
+                Ok(ans) => x.set_index(ans),
+                Err(err) => err.die(),
+            }
+        }
+        _ => (),
     }
 }
 
@@ -584,7 +282,7 @@ fn download_callback(
 
             if let std::collections::hash_map::Entry::Vacant(e) = bar_map.entry(file.to_string()) {
                 let pb = mp.add(ProgressBar::new(100));
-                pb.set_style(progress_bar_style(false).clone());
+                pb.set_style(Napm::progress_bar_style(false).clone());
                 pb.set_message(file.to_string());
                 e.insert(pb);
             }
@@ -612,7 +310,7 @@ fn download_callback(
                         pb.finish_with_message(format!("{file} up to date"))
                     }
                     DownloadResult::Failed => {
-                        pb.set_style(progress_bar_style(true).clone());
+                        pb.set_style(Napm::progress_bar_style(true).clone());
                         pb.finish_with_message(format!("{file} failed"));
                     }
                 }
@@ -636,7 +334,7 @@ fn progress_callback(
 
     if let std::collections::hash_map::Entry::Vacant(e) = bar_map.entry(file.to_string()) {
         let pb = mp.add(ProgressBar::new(100));
-        pb.set_style(progress_bar_style(false).clone());
+        pb.set_style(Napm::progress_bar_style(false).clone());
         pb.set_message(file.to_string());
 
         e.insert(pb);

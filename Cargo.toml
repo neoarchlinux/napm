@@ -4,13 +4,14 @@ version = "0.1.1"
 edition = "2024"
 
 [dependencies]
-alpm = "5.0.0"
-alpm-sys = "4.0.3"
-anyhow = "1.0.100"
+alpm = "5.0.2"
+cini = "1.0.0"
 clap = { version = "4.5.50", features = ["derive"] }
 flate2 = "1.1.5"
 indicatif = "0.18.2"
+nix = { version = "0.31.1", features = ["user"] }
 pacmanconf = "3.1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tar = "0.4.44"
+thiserror = "2.0.18"

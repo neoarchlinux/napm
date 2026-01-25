@@ -1,5 +1,4 @@
-use anyhow::Result;
-
+use crate::error::Result;
 use crate::napm::Napm;
 
 pub fn run(napm: &Napm) -> Result<()> {
