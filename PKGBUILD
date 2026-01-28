@@ -3,7 +3,7 @@ pkgver=0.1.2
 pkgrel=1
 pkgdesc="NeoArch package manager"
 arch=('x86_64')
-url="https://github.com/doleckijakub/napm"
+url="https://github.com/neoarchlinux/napm"
 license=('GPL-3.0')
 
 depends=(
