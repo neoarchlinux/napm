@@ -1,11 +1,11 @@
 use clap::{Parser, Subcommand};
 
 pub mod ansi;
-pub mod log;
 pub mod error;
+pub mod log;
+pub mod napm;
 pub mod pkg;
 pub mod util;
-pub mod napm;
 
 pub mod commands {
     pub mod files;
@@ -44,19 +44,19 @@ enum Commands {
     Find {
         path: String,
 
-        #[arg(long, default_value_t = false, help = "Only match exact paths (e.g. /bin/sudo)")]
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Only match exact paths (e.g. /bin/sudo)"
+        )]
         exact: bool,
     },
 
     #[command(about = "Show package information")]
-    Info {
-        package: String,
-    },
+    Info { package: String },
 
     #[command(about = "Install packages")]
-    Install {
-        packages: Vec<String>,
-    },
+    Install { packages: Vec<String> },
 
     #[command(about = "List installed packages")]
     List,
@@ -65,7 +65,11 @@ enum Commands {
     Remove {
         packages: Vec<String>,
 
-        #[arg(long, default_value_t = false, help = "Do not remove dependencies (not recommended)")]
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Do not remove dependencies (not recommended)"
+        )]
         no_deep: bool,
     },
 
@@ -78,7 +82,14 @@ enum Commands {
     },
 
     #[command(about = "Update the package metadata, NOTE: this is not a system upgrade !!!")]
-    Update,
+    Update {
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Do not update the file cache (just the package database)"
+        )]
+        no_file_cache: bool,
+    },
 
     #[command(about = "Upgrade all packages on the system")]
     Upgrade,
@@ -95,7 +106,7 @@ fn run() -> Result<()> {
     let mut napm = Napm::new()?;
 
     match cli.command {
-        Commands::Update => commands::update::run(&mut napm),
+        Commands::Update { no_file_cache } => commands::update::run(&mut napm, no_file_cache),
         Commands::Files { package, dirs } => commands::files::run(&mut napm, &package, dirs),
         Commands::Info { package } => commands::info::run(&napm, &package),
         Commands::Install { packages } => commands::install::run(
@@ -117,7 +128,10 @@ fn run() -> Result<()> {
                 .as_slice(),
             !no_deep,
         ),
-        Commands::Search { search_terms, num_results } => commands::search::run(&napm, search_terms, num_results),
+        Commands::Search {
+            search_terms,
+            num_results,
+        } => commands::search::run(&napm, search_terms, num_results),
         Commands::Upgrade => commands::upgrade::run(&mut napm),
     }?;
 

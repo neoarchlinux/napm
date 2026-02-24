@@ -1,5 +1,5 @@
 use alpm::{
-    Alpm, AnyEvent, AnyQuestion, AnyDownloadEvent, DownloadEvent, DownloadEventCompleted,
+    Alpm, AnyDownloadEvent, AnyEvent, AnyQuestion, DownloadEvent, DownloadEventCompleted,
     DownloadEventProgress, DownloadResult, Usage,
 };
 use indicatif::{MultiProgress, ProgressBar};
@@ -12,14 +12,14 @@ use std::{
 use crate::ansi::*;
 use crate::error::{Error, Result};
 use crate::pkg::Pkg;
-use crate::{log_info, log_warn, log_error};
-use crate::util::{confirm, choose};
+use crate::util::{choose, confirm};
+use crate::{log_error, log_info, log_warn};
 
 pub mod actions;
 pub mod auto_repair;
-pub mod util;
-pub mod style;
 pub mod cache;
+pub mod style;
+pub mod util;
 
 // NAPM ERROR DATA
 
@@ -56,6 +56,15 @@ pub struct Napm {
 
 impl Napm {
     pub fn new() -> Result<Self> {
+        let mut me = Self {
+            config: Config::new().map_err(|_| Error::ConfigParse)?,
+            handle: None,
+        };
+        me.reset()?;
+        Ok(me)
+    }
+
+    pub fn reset(&mut self) -> Result<()> {
         let cfg = Config::new().map_err(|_| Error::ConfigParse)?;
 
         if cfg.root_dir != "/" {
@@ -108,7 +117,7 @@ impl Napm {
         }
 
         handle.add_hookdir("/usr/share/libalpm/hooks")?;
-        
+
         for hook_dir in &cfg.hook_dir {
             handle.add_hookdir(hook_dir.clone())?;
         }
@@ -130,10 +139,10 @@ impl Napm {
 
         // TODO: handle.set_fetch_cb
 
-        Ok(Self {
-            config: cfg,
-            handle: Some(handle),
-        })
+        self.config = cfg;
+        self.handle = Some(handle);
+
+        Ok(())
     }
 }
 
@@ -146,11 +155,8 @@ impl Drop for Napm {
     }
 }
 
-fn event_callback(
-    ev: AnyEvent,
-    _: &mut (),
-) {
-    use alpm::{PackageOperation, HookWhen};
+fn event_callback(ev: AnyEvent, _: &mut ()) {
+    use alpm::{HookWhen, PackageOperation};
 
     use alpm::Event as E;
     match ev.event() {
@@ -166,9 +172,21 @@ fn event_callback(
         E::TransactionDone => (),
         E::PackageOperationStart(pkg_op_ev) => match pkg_op_ev.operation() {
             PackageOperation::Install(p) => log_info!("Installing {}-{}", p.name(), p.version()),
-            PackageOperation::Upgrade(p1, p2) => log_info!("Upgrading {} from {} to {}", p1.name(), p1.version(), p2.version()),
-            PackageOperation::Reinstall(p1, _p2) => log_info!("Reinstalling {}-{}", p1.name(), p1.version()),
-            PackageOperation::Downgrade(p1, p2) => log_info!("Downgrading {} ({} => {})", p1.name(), p1.version(), p2.version()),
+            PackageOperation::Upgrade(p1, p2) => log_info!(
+                "Upgrading {} from {} to {}",
+                p1.name(),
+                p1.version(),
+                p2.version()
+            ),
+            PackageOperation::Reinstall(p1, _p2) => {
+                log_info!("Reinstalling {}-{}", p1.name(), p1.version())
+            }
+            PackageOperation::Downgrade(p1, p2) => log_info!(
+                "Downgrading {} ({} => {})",
+                p1.name(),
+                p1.version(),
+                p2.version()
+            ),
             PackageOperation::Remove(p) => log_info!("Removing {}-{}", p.name(), p.version()),
         },
         E::PackageOperationDone(_) => (),
@@ -177,40 +195,73 @@ fn event_callback(
         E::LoadStart => (),
         E::LoadDone => (),
         E::ScriptletInfo(scriptlet_info) => log_info!("  {}", scriptlet_info.line().trim()),
-        E::RetrieveStart => log_info!("Retrieving packages"),
+        E::RetrieveStart => log_info!("Retrieving files"),
         E::RetrieveDone => (),
-        E::RetrieveFailed => log_info!("Failed to retrieve packages"),
-        E::PkgRetrieveStart(retrieve_ev) => log_info!("Retrieving {} packages, total size {}", retrieve_ev.num(), retrieve_ev.total_size()),
+        E::RetrieveFailed => log_info!("Failed to retrieve some"),
+        E::PkgRetrieveStart(retrieve_ev) => log_info!(
+            "Retrieving {} packages, total size {}",
+            retrieve_ev.num(),
+            retrieve_ev.total_size()
+        ),
         E::PkgRetrieveDone(_retrieve_ev) => (),
         E::PkgRetrieveFailed(_retrieve_ev) => log_error!("Package retireve failed"),
         E::DiskSpaceStart => log_info!("Checking availible disk space"),
         E::DiskSpaceDone => (),
-        E::OptDepRemoval(opt_dep_rm_ev) => if let Some(desc) = opt_dep_rm_ev.optdep().desc() {
-            log_info!("Package {} optionally requires {}: {}", opt_dep_rm_ev.pkg().name(), opt_dep_rm_ev.optdep().name(), desc)
-        } else {
-            log_info!("Package {} optionally requires {}", opt_dep_rm_ev.pkg().name(), opt_dep_rm_ev.optdep().name())
+        E::OptDepRemoval(opt_dep_rm_ev) => {
+            if let Some(desc) = opt_dep_rm_ev.optdep().desc() {
+                log_info!(
+                    "Package {} optionally requires {}: {}",
+                    opt_dep_rm_ev.pkg().name(),
+                    opt_dep_rm_ev.optdep().name(),
+                    desc
+                )
+            } else {
+                log_info!(
+                    "Package {} optionally requires {}",
+                    opt_dep_rm_ev.pkg().name(),
+                    opt_dep_rm_ev.optdep().name()
+                )
+            }
         }
-        E::DatabaseMissing(dm_missing_ev) => log_error!("Database {} missing", dm_missing_ev.dbname()),
+        E::DatabaseMissing(dm_missing_ev) => {
+            log_error!("Database {} missing", dm_missing_ev.dbname())
+        }
         E::KeyringStart => log_info!("Checking keys in keyring"),
         E::KeyringDone => (),
         E::KeyDownloadStart => log_info!("Downloading keys"),
         E::KeyDownloadDone => (),
-        E::PacnewCreated(pacnew_ev) => log_warn!("File {} installed as {}.pacnew", pacnew_ev.file(), pacnew_ev.file()),
-        E::PacsaveCreated(pacsave_ev) => log_warn!("File {} saved as {}.pacsave", pacsave_ev.file(), pacsave_ev.file()),
-        E::HookStart(hook_ev) => log_info!("Running {} hooks", match hook_ev.when() {
-            HookWhen::PreTransaction => "pre transaction",
-            HookWhen::PostTransaction => "post transaction",
-        }),
+        E::PacnewCreated(pacnew_ev) => log_warn!(
+            "File {} installed as {}.pacnew",
+            pacnew_ev.file(),
+            pacnew_ev.file()
+        ),
+        E::PacsaveCreated(pacsave_ev) => log_warn!(
+            "File {} saved as {}.pacsave",
+            pacsave_ev.file(),
+            pacsave_ev.file()
+        ),
+        E::HookStart(hook_ev) => log_info!(
+            "Running {} hooks",
+            match hook_ev.when() {
+                HookWhen::PreTransaction => "pre transaction",
+                HookWhen::PostTransaction => "post transaction",
+            }
+        ),
         E::HookDone(_hook_ev) => (),
-        E::HookRunStart(hook_run_ev) => log_info!("Running hook {}/{}: {}", hook_run_ev.position(), hook_run_ev.total(), hook_run_ev.desc().unwrap_or(hook_run_ev.name()).trim_end_matches("...")),
+        E::HookRunStart(hook_run_ev) => log_info!(
+            "Running hook {}/{}: {}",
+            hook_run_ev.position(),
+            hook_run_ev.total(),
+            hook_run_ev
+                .desc()
+                .unwrap_or(hook_run_ev.name())
+                .trim_end_matches("...")
+        ),
         E::HookRunDone(_hook_run_ev) => (),
     };
 }
 
-fn question_callback(
-    q: AnyQuestion,
-    _: &mut (),
-) {
+fn question_callback(q: AnyQuestion, _: &mut ()) {
     use alpm::Question as Q;
     use std::path::Path;
 
@@ -218,7 +269,9 @@ fn question_callback(
         Q::Conflict(mut x) => {
             let pkg_a = x.conflict().package1().name();
             let pkg_b = x.conflict().package2().name();
-            let prompt = format!("Conflict between {ANSI_CYAN}{pkg_a}{ANSI_RESET} and {ANSI_CYAN}{pkg_b}{ANSI_RESET}; Remove {ANSI_RED}{pkg_b}{ANSI_RESET}?");
+            let prompt = format!(
+                "Conflict between {ANSI_CYAN}{pkg_a}{ANSI_RESET} and {ANSI_CYAN}{pkg_b}{ANSI_RESET}; Remove {ANSI_RED}{pkg_b}{ANSI_RESET}?"
+            );
 
             match confirm(&prompt, true) {
                 Ok(ans) => x.set_remove(ans),
@@ -239,7 +292,9 @@ fn question_callback(
             let filepath = x.filepath();
             let filename = Path::new(filepath).file_name().unwrap().to_str().unwrap();
             let reason = x.reason();
-            let prompt = format!("File {ANSI_MAGENTA}{filename}{ANSI_RESET} is corrupted: {reason}. Remove package?");
+            let prompt = format!(
+                "File {ANSI_MAGENTA}{filename}{ANSI_RESET} is corrupted: {reason}. Remove package?"
+            );
 
             match confirm(&prompt, true) {
                 Ok(ans) => x.set_remove(ans),
@@ -259,13 +314,16 @@ fn question_callback(
         Q::SelectProvider(mut x) => {
             let dep = x.depend();
             let name = dep.name();
-            let providers = x.providers()
+            let providers = x
+                .providers()
                 .into_iter()
                 .map(Pkg::from)
                 .map(|pkg| pkg.name)
                 .collect::<Vec<_>>();
 
-            let prompt = format!("There are several providers for {ANSI_MAGENTA}{name}{ANSI_RESET} and you must choose one");
+            let prompt = format!(
+                "There are several providers for {ANSI_MAGENTA}{name}{ANSI_RESET} and you must choose one"
+            );
 
             match choose(&prompt, providers.as_slice(), 0) {
                 Ok(ans) => x.set_index(ans),

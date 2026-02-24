@@ -1,14 +1,48 @@
+use std::path::Path;
+
 use alpm::TransFlag;
 
 use crate::napm::*;
-use crate::{log_info, log_warn, log_fatal};
-// use crate::util::require_root;
+use crate::util::run_upgrade;
+use crate::{log_fatal, log_info, log_warn};
 
 impl Napm {
     pub fn install_pkgs(&mut self, pkgs: &[Pkg]) -> Result<()> {
-        log_info!("Installing {} with all {} dependencies",
-            pkgs
-                .iter()
+        let result = self.install_pkgs_attempt(pkgs);
+
+        if let Err(Error::UpgradeRequired) = &result {
+            log_warn!("Stale database detected, update and upgrade required");
+
+            let lock_path = self.h().lockfile();
+            let _ = std::fs::remove_file(lock_path);
+
+            let sync_path = Path::new(self.h().dbpath()).join("sync");
+            if let Ok(entries) = std::fs::read_dir(&sync_path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |e| e == "db") {
+                        log_info!("Removing stale db: {}", path.display());
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+
+            run_upgrade()?;
+
+            std::fs::File::create(std::path::Path::new(&lock_path))?;
+
+            self.reset()?;
+
+            return self.install_pkgs_attempt(pkgs);
+        }
+
+        result
+    }
+
+    fn install_pkgs_attempt(&mut self, pkgs: &[Pkg]) -> Result<()> {
+        log_info!(
+            "Installing {} with all {} dependencies",
+            pkgs.iter()
                 .map(|pkg| pkg.formatted_name(true))
                 .collect::<Vec<_>>()
                 .join(", "),
@@ -59,11 +93,9 @@ impl Napm {
     }
 
     pub fn upgrade(&mut self) -> Result<()> {
-        // TODO: remind to update if one was not done recently
-
         log_info!("Upgrading the system");
 
-        // TODO: list upgradable packages and ask for confimration
+        // TODO: list upgradable packages and maybe ask for confimration
 
         self.trans_init(TransFlag::NONE)?;
 
@@ -75,14 +107,17 @@ impl Napm {
     }
 
     pub fn remove_pkgs(&mut self, pkgs: &[Pkg], deep: bool) -> Result<()> {
-        log_info!("Removing {}{}",
-            pkgs
-                .iter()
+        log_info!(
+            "Removing {}{}",
+            pkgs.iter()
                 .map(|pkg| pkg.formatted_name(true))
                 .collect::<Vec<_>>()
                 .join(", "),
             if deep {
-                format!(" with all {} dependencies", if pkgs.len() == 1 { "its" } else { "their" })
+                format!(
+                    " with all {} dependencies",
+                    if pkgs.len() == 1 { "its" } else { "their" }
+                )
             } else {
                 "".to_string()
             }

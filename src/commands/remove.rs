@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::log_error;
-use crate::util::{confirm, require_root};
 use crate::napm::Napm;
+use crate::util::{confirm, require_root};
 
 pub fn run(napm: &mut Napm, pkg_names: &[&str], deep: bool) -> Result<()> {
     require_root()?;
@@ -25,7 +25,10 @@ pub fn run(napm: &mut Napm, pkg_names: &[&str], deep: bool) -> Result<()> {
                 log_error!("{invalid_err}");
             }
 
-            let confirm_message = format!("Some packages were invalid, do you still want to remove the rest ({})?", valid_names.join(", "));
+            let confirm_message = format!(
+                "Some packages were invalid, do you still want to remove the rest ({})?",
+                valid_names.join(", ")
+            );
 
             if !valid_names.is_empty() && !confirm(&confirm_message, true)? {
                 return Err(Error::Stopped);
@@ -41,6 +44,6 @@ pub fn run(napm: &mut Napm, pkg_names: &[&str], deep: bool) -> Result<()> {
             .filter_map(|pkg| pkg.ok())
             .collect::<Vec<_>>()
     };
-    
+
     napm.remove_pkgs(&pkgs, deep)
 }

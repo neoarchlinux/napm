@@ -121,6 +121,9 @@ pub enum Error {
 
     #[error("Cache database error: {0}")]
     CacheDatabaseError(rusqlite::Error),
+
+    #[error("System upgrade reqiuired")]
+    UpgradeRequired,
 }
 
 impl Error {

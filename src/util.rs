@@ -1,19 +1,22 @@
+use std::collections::HashMap;
 use std::env;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
-use std::os::unix::process::CommandExt;
-use std::collections::HashMap;
 
 use crate::ansi::*;
 use crate::error::{Error, Result};
-use crate::{format_action_required, log_info, log_warn, log_error};
 use crate::napm::cache::NAPM_CACHE_FILE;
+use crate::{format_action_required, log_error, log_info, log_warn};
 
 pub fn confirm(prompt: &str, default_yes: bool) -> Result<bool> {
     use std::io::{self, Write};
 
     loop {
-        eprint!("{}", format_action_required!("{} [{}]: ", prompt, if default_yes { "Y/n" } else { "y/N" }));
+        eprint!(
+            "{}",
+            format_action_required!("{} [{}]: ", prompt, if default_yes { "Y/n" } else { "y/N" })
+        );
         io::stderr().flush()?;
 
         let mut input = String::new();
@@ -45,7 +48,10 @@ pub fn choose(prompt: &str, options: &[String], default: i32) -> Result<i32> {
             eprintln!(" - {ANSI_BOLD}{i}{ANSI_RESET}: {}", option);
         }
 
-        eprint!("{}", format_action_required!("Your choice (default = {}): ", default));
+        eprint!(
+            "{}",
+            format_action_required!("Your choice (default = {}): ", default)
+        );
         io::stderr().flush()?;
 
         let mut input = String::new();
@@ -58,7 +64,10 @@ pub fn choose(prompt: &str, options: &[String], default: i32) -> Result<i32> {
             match input.to_string().parse() {
                 Ok(n) if n < options.len() as i32 => n,
                 _ => {
-                    log_error!("Invalid option '{input}', you must choose a number between 0 and {}", options.len() - 1);
+                    log_error!(
+                        "Invalid option '{input}', you must choose a number between 0 and {}",
+                        options.len() - 1
+                    );
                     continue;
                 }
             }
@@ -76,19 +85,19 @@ fn detect_pe_program() -> Result<String> {
             return Ok(candidate.to_string());
         }
     }
-    
+
     Err(Error::NoPETool)
 }
 
 pub const SHELLS: &[&str] = &["bash"]; // TODO: zsh, fish, etc.
 
-fn detech_shell() -> Result<String> {
+fn detect_shell() -> Result<String> {
     for candidate in SHELLS {
         if which(candidate) {
             return Ok(candidate.to_string());
         }
     }
-    
+
     Err(Error::NoShell)
 }
 
@@ -114,7 +123,7 @@ pub fn is_root() -> bool {
 }
 
 pub fn current_exe() -> String {
-    env::args().nth(0).unwrap_or("napm".to_string())
+    env::args().next().unwrap_or("napm".to_string())
 }
 
 pub fn current_args() -> Vec<String> {
@@ -142,22 +151,25 @@ fn napm_as_root_cmd(args: Vec<String>) -> Result<(Command, String)> {
         vars
     };
 
-    let safe_arg = |a: &str| if a.chars().all(|c| {
-        "abcdefghijklmonpqrstuvwxyzABCDEFGHIJKLMONPQRSTUVWXYZ0123456789-_/."
-    }.contains(c)) {
-        a.to_string()
-    } else {
-        format!("\"{a}\"")
+    let safe_arg = |a: &str| {
+        if a.chars().all(|c| {
+            { "abcdefghijklmonpqrstuvwxyzABCDEFGHIJKLMONPQRSTUVWXYZ0123456789-_/." }.contains(c)
+        }) {
+            a.to_string()
+        } else {
+            format!("\"{a}\"")
+        }
     };
 
     let envs_str = if envs.is_empty() {
         "".to_string()
     } else {
-        format!("{} ", envs
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(" ")
+        format!(
+            "{} ",
+            envs.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
         )
     };
 
@@ -169,6 +181,7 @@ fn napm_as_root_cmd(args: Vec<String>) -> Result<(Command, String)> {
 
     if is_root() {
         command.envs(envs);
+        command.args(args);
     } else {
         if !envs.is_empty() {
             match detect_pe_program()?.as_str() {
@@ -182,9 +195,10 @@ fn napm_as_root_cmd(args: Vec<String>) -> Result<(Command, String)> {
                     command.args(args);
                 }
                 "doas" | "pkexec" => {
-                    let shell = detech_shell()?;
+                    let shell = detect_shell()?;
 
-                    if shell == "bash" { // TODO: match when more shells
+                    if shell == "bash" {
+                        // TODO: match when more shells
                         command.arg(shell);
                         command.arg("-c");
                         command.arg(&format!("{envs_str}{args_str}"));
@@ -192,7 +206,7 @@ fn napm_as_root_cmd(args: Vec<String>) -> Result<(Command, String)> {
                         unimplemented!("Unhandled shell: {shell}");
                     }
                 }
-                other_pe_program => unimplemented!("Unhandled PE program: {other_pe_program}")
+                other_pe_program => unimplemented!("Unhandled PE program: {other_pe_program}"),
             }
         } else {
             command.arg(cmd);
@@ -201,13 +215,10 @@ fn napm_as_root_cmd(args: Vec<String>) -> Result<(Command, String)> {
     }
 
     let cmd_display = if is_root() {
-        format!("{}{} {}",
-            envs_str,
-            safe_arg(cmd),
-            args_str
-        )
+        format!("{}{} {}", envs_str, safe_arg(cmd), args_str)
     } else {
-        format!("{} {}{} {}",
+        format!(
+            "{} {}{} {}",
             detect_pe_program()?,
             envs_str,
             safe_arg(cmd),
@@ -228,9 +239,14 @@ pub fn require_root() -> Result<()> {
     if is_root() {
         log_info!("# {}", cmd_display);
     } else {
-        log_warn!("You cannot perform this command without {ANSI_YELLOW}root priviledges{ANSI_RESET}");
+        log_warn!(
+            "You cannot perform this command without {ANSI_YELLOW}root priviledges{ANSI_RESET}"
+        );
 
-        let prompt = format!("Do you want to run {ANSI_YELLOW}{}{ANSI_RESET} automatically?", cmd_display);
+        let prompt = format!(
+            "Do you want to run {ANSI_YELLOW}{}{ANSI_RESET} automatically?",
+            cmd_display
+        );
 
         if !confirm(&prompt, true)? {
             return Err(Error::DeniedPE(cmd_display));
@@ -242,21 +258,31 @@ pub fn require_root() -> Result<()> {
     Err(cmd.exec().into())
 }
 
-pub fn require_cache() -> Result<()> {
-    let cache_path = Path::new(NAPM_CACHE_FILE);
-    
-    if cache_path.exists() {
-        return Ok(());
-    }
-
+pub fn run_cache_update() -> Result<()> {
     let (mut cmd, cmd_display) = napm_as_root_cmd(vec!["update".to_string()])?;
 
     if is_root() {
+        log_warn!("System needs to be updated");
+
+        let prompt = format!(
+            "Do you want to run {ANSI_YELLOW}{}{ANSI_RESET} automatically?",
+            cmd_display
+        );
+
+        if !confirm(&prompt, true)? {
+            return Err(Error::DeniedPE(cmd_display));
+        }
+
         log_info!("# {}", cmd_display);
     } else {
-        log_warn!("System needs to be updated and you need {ANSI_YELLOW}root priviledges{ANSI_RESET} for that");
+        log_warn!(
+            "System needs to be updated and you need {ANSI_YELLOW}root priviledges{ANSI_RESET} for that"
+        );
 
-        let prompt = format!("Do you want to run {ANSI_YELLOW}{}{ANSI_RESET} automatically?", cmd_display);
+        let prompt = format!(
+            "Do you want to run {ANSI_YELLOW}{}{ANSI_RESET} automatically?",
+            cmd_display
+        );
 
         if !confirm(&prompt, true)? {
             return Err(Error::DeniedPE(cmd_display));
@@ -266,11 +292,87 @@ pub fn require_cache() -> Result<()> {
     }
 
     match cmd.spawn()?.wait() {
-        Ok(status) => if status.success() {
-            Ok(())
-        } else {
-            Err(Error::System)
+        Ok(status) => {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(Error::System)
+            }
         }
-        Err(err) => Err(Error::InternalIO(err))
+        Err(err) => Err(Error::InternalIO(err)),
+    }
+}
+
+pub fn require_cache() -> Result<()> {
+    let cache_path = Path::new(NAPM_CACHE_FILE);
+
+    if cache_path.exists() {
+        return Ok(());
+    }
+
+    run_cache_update()
+}
+
+pub fn run_upgrade() -> Result<()> {
+    let (mut cmd_ud, cmd_ud_display) =
+        napm_as_root_cmd(vec!["update".to_string(), "--no-file-cache".to_string()])?;
+    let (mut cmd_ug, cmd_ug_display) = napm_as_root_cmd(vec!["upgrade".to_string()])?;
+
+    if is_root() {
+        log_warn!("System needs to be updated and upgraded");
+
+        let prompt = format!(
+            "Do you want to run {ANSI_YELLOW}{}{ANSI_RESET} and {ANSI_YELLOW}{}{ANSI_RESET} automatically?",
+            cmd_ud_display, cmd_ug_display
+        );
+
+        if !confirm(&prompt, true)? {
+            return Err(Error::DeniedPE(format!(
+                "{}{ANSI_RESET}, {ANSI_YELLOW}{}",
+                cmd_ud_display, cmd_ud_display
+            )));
+        }
+    } else {
+        log_warn!(
+            "System needs to be updated and upgraded and you need {ANSI_YELLOW}root priviledges{ANSI_RESET} for that"
+        );
+
+        let prompt = format!(
+            "Do you want to run {ANSI_YELLOW}{}{ANSI_RESET} and {ANSI_YELLOW}{}{ANSI_RESET} automatically?",
+            cmd_ud_display, cmd_ug_display
+        );
+
+        if !confirm(&prompt, true)? {
+            return Err(Error::DeniedPE(format!(
+                "{}{ANSI_RESET}, {ANSI_YELLOW}{}",
+                cmd_ud_display, cmd_ud_display
+            )));
+        }
+    }
+
+    log_info!("{} {}", if is_root() { "#" } else { "$" }, cmd_ud_display);
+
+    match cmd_ud.spawn()?.wait() {
+        Ok(status) => {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(Error::System)
+            }
+        }
+        Err(err) => Err(Error::InternalIO(err)),
+    }?;
+
+    log_info!("{} {}", if is_root() { "#" } else { "$" }, cmd_ug_display);
+
+    match cmd_ug.spawn()?.wait() {
+        Ok(status) => {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(Error::System)
+            }
+        }
+        Err(err) => Err(Error::InternalIO(err)),
     }
 }

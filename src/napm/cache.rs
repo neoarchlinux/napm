@@ -1,17 +1,17 @@
-use std::{
-    fs,
-    collections::{HashMap, HashSet},
-    io::Read,
-    path::Path,
-};
 use flate2::read::GzDecoder;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rusqlite::Connection;
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    io::Read,
+    path::Path,
+};
 use tar::Archive;
 
 use crate::error::{Error, Result};
-use crate::napm::*;
 use crate::log_warn;
+use crate::napm::*;
 use crate::util::require_cache;
 
 pub const NAPM_CACHE_FILE: &str = "/var/cache/napm.sqlite";
@@ -73,18 +73,32 @@ impl Napm {
     }
 
     fn repo_priority_with_column_name(&self, col_name: &str) -> String {
-        format!("CASE {col_name} {} ELSE 1000 END", self.config.repos.iter().enumerate().map(|(i, r)| format!("WHEN '{}' THEN {}", r.name, i)).collect::<Vec<_>>().join(" "))
+        format!(
+            "CASE {col_name} {} ELSE 1000 END",
+            self.config
+                .repos
+                .iter()
+                .enumerate()
+                .map(|(i, r)| format!("WHEN '{}' THEN {}", r.name, i))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
     }
 
     fn pkg_exists(conn: &Connection, pkg_name: &str) -> Result<bool> {
-        Ok(conn.prepare("SELECT 1 FROM package_desc WHERE name = ?1")?.exists([pkg_name])?)
+        Ok(conn
+            .prepare("SELECT 1 FROM package_desc WHERE name = ?1")?
+            .exists([pkg_name])?)
     }
 
     fn count_archive_files(path: &Path) -> Result<usize> {
         let file = fs::File::open(path).map_err(|_| Error::OpenArchive)?;
         let decoder = GzDecoder::new(file);
         let mut archive = Archive::new(decoder);
-        Ok(archive.entries().map_err(|_| Error::ExtractArchive)?.into_iter().count())
+        Ok(archive
+            .entries()
+            .map_err(|_| Error::ExtractArchive)?
+            .count())
     }
 
     fn process_archive<F>(
@@ -93,7 +107,7 @@ impl Napm {
         path: &Path,
         repo: &str,
         action: &str,
-        mut f: F
+        mut f: F,
     ) -> Result<()>
     where
         F: FnMut(&mut tar::Entry<GzDecoder<fs::File>>) -> Result<()>,
@@ -106,9 +120,11 @@ impl Napm {
 
         let pb = mp.insert_before(total_pb, ProgressBar::new(len as u64));
         pb.set_style(
-            ProgressStyle::with_template("[{elapsed:>3}] [{bar:40.cyan/blue}] {percent:>3}% {msg} {pos}/{len}")
-                .unwrap()
-                .progress_chars("=> ")
+            ProgressStyle::with_template(
+                "[{elapsed:>3}] [{bar:40.cyan/blue}] {percent:>3}% {msg} {pos}/{len}",
+            )
+            .unwrap()
+            .progress_chars("=> "),
         );
         pb.set_message(format!("caching {repo}: {action}..."));
         pb.set_length(Self::count_archive_files(path)? as u64);
@@ -128,7 +144,7 @@ impl Napm {
         pb.set_style(
             ProgressStyle::with_template("[{elapsed:>3}] [{bar:40.cyan/blue}] {percent:>3}% {msg}")
                 .unwrap()
-                .progress_chars("=> ")
+                .progress_chars("=> "),
         );
         pb.finish_with_message(format!("caching {repo}: {action} done"));
 
@@ -145,6 +161,8 @@ impl Napm {
     }
 
     pub fn update_cache(&self) -> Result<()> {
+        log_info!("Updating cache");
+
         let cache_path = Path::new(NAPM_CACHE_FILE);
         let needs_init = !cache_path.exists();
         let mut conn = Connection::open(cache_path)?;
@@ -163,8 +181,12 @@ impl Napm {
             let entry = entry?;
             let path = entry.path();
 
-            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue; };
-            if !fname.ends_with(".files") { continue; }
+            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !fname.ends_with(".files") {
+                continue;
+            }
 
             total_work += 2 * Self::count_archive_files(&path)?;
         }
@@ -184,8 +206,12 @@ impl Napm {
             let entry = entry?;
             let path = entry.path();
 
-            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue; };
-            if !fname.ends_with(".files") { continue; }
+            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !fname.ends_with(".files") {
+                continue;
+            }
 
             let repo = fname.trim_end_matches(".files");
 
@@ -207,8 +233,7 @@ impl Napm {
 
                 let mut contents = Vec::new();
                 entry.read_to_end(&mut contents)?;
-                let contents = String::from_utf8(contents)
-                    .map_err(|_| Error::ExtractArchive)?;
+                let contents = String::from_utf8(contents).map_err(|_| Error::ExtractArchive)?;
 
                 let mut name = None;
                 let mut version = None;
@@ -217,9 +242,9 @@ impl Napm {
                 let mut lines = contents.lines();
                 while let Some(tag) = lines.next() {
                     match tag {
-                        "%NAME%" =>    name =    lines.next().map(str::to_string),
+                        "%NAME%" => name = lines.next().map(str::to_string),
                         "%VERSION%" => version = lines.next().map(str::to_string),
-                        "%DESC%" =>    desc =    lines.next().map(str::to_string),
+                        "%DESC%" => desc = lines.next().map(str::to_string),
                         _ => {}
                     }
                 }
@@ -258,8 +283,8 @@ impl Napm {
 
                     let mut contents = Vec::new();
                     entry.read_to_end(&mut contents)?;
-                    let contents = String::from_utf8(contents)
-                        .map_err(|_| Error::ExtractArchive)?;
+                    let contents =
+                        String::from_utf8(contents).map_err(|_| Error::ExtractArchive)?;
 
                     for line in contents.lines().skip(1) {
                         tx.execute(
@@ -284,7 +309,7 @@ impl Napm {
 
         total_pb.set_style(
             ProgressStyle::with_template(
-                "[{elapsed:>3}] [{bar:40.cyan/blue}] {percent:>3}% caching done"
+                "[{elapsed:>3}] [{bar:40.cyan/blue}] {percent:>3}% caching done",
             )
             .unwrap()
             .progress_chars("=> "),
@@ -298,7 +323,7 @@ impl Napm {
         require_cache()?;
 
         let cache_path = Path::new(NAPM_CACHE_FILE);
-        
+
         let conn = Connection::open(cache_path)?;
 
         let mut stmt = conn.prepare(&format!(
@@ -317,12 +342,14 @@ impl Napm {
         ))?;
 
         use rusqlite::Error as E;
-        match stmt.query_one([pkg_name], |row| Ok(Pkg {
-            name: row.get(0)?,
-            version: row.get(1)?,
-            desc: row.get(2)?,
-            repo: row.get(3)?,
-        })) {
+        match stmt.query_one([pkg_name], |row| {
+            Ok(Pkg {
+                name: row.get(0)?,
+                version: row.get(1)?,
+                desc: row.get(2)?,
+                repo: row.get(3)?,
+            })
+        }) {
             Ok(pkg) => Ok(pkg),
             Err(E::QueryReturnedNoRows) => Err(Error::PackageNotFound(pkg_name.to_string())),
             Err(err) => Err(Error::CacheDatabaseError(err)),
@@ -333,7 +360,7 @@ impl Napm {
         require_cache()?;
 
         let cache_path = Path::new(NAPM_CACHE_FILE);
-        
+
         let conn = Connection::open(cache_path)?;
 
         if !Self::pkg_exists(&conn, pkg_name)? {
@@ -353,21 +380,24 @@ impl Napm {
             ) {}
             ",
             self.repo_priority(),
-            if with_dirs { "" } else { "AND path NOT LIKE '%/'" }
+            if with_dirs {
+                ""
+            } else {
+                "AND path NOT LIKE '%/'"
+            }
         ))?;
 
-        Ok(
-            stmt.query_map([pkg_name], |row| row.get(0))?
-                .filter_map(|r| r.ok())
-                .collect()
-        )
+        Ok(stmt
+            .query_map([pkg_name], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect())
     }
 
     pub fn find_packages_by_file(&self, path: &str, exact: bool) -> Result<Vec<(Pkg, String)>> {
         require_cache()?;
-        
+
         let cache_path = Path::new(NAPM_CACHE_FILE);
-        
+
         let conn = Connection::open(cache_path)?;
 
         let mut stmt = conn.prepare(&format!(
@@ -399,23 +429,27 @@ impl Napm {
             self.repo_priority_with_column_name("d2.repo"),
         ))?;
 
-        Ok(
-            stmt.query_map([&if exact { 
-                path.to_string()
-            } else {
-                format!("%{path}")
-            }], |row| Ok((
-                Pkg {
-                    name: row.get(0)?,
-                    version: row.get(1)?,
-                    desc: row.get(2)?,
-                    repo: row.get(3)?,
+        Ok(stmt
+            .query_map(
+                [&if exact {
+                    path.to_string()
+                } else {
+                    format!("%{path}")
+                }],
+                |row| {
+                    Ok((
+                        Pkg {
+                            name: row.get(0)?,
+                            version: row.get(1)?,
+                            desc: row.get(2)?,
+                            repo: row.get(3)?,
+                        },
+                        row.get(4)?,
+                    ))
                 },
-                row.get(4)?
-            )))?
-                .filter_map(|r| r.ok())
-                .collect()
-        )
+            )?
+            .filter_map(|r| r.ok())
+            .collect())
     }
 
     fn tokenize(s: &str) -> Vec<String> {
@@ -425,12 +459,7 @@ impl Napm {
             .collect()
     }
 
-    fn select_candidates(
-        &self,
-        conn: &Connection,
-        query_words: &[String],
-    ) -> Result<Vec<Pkg>> {
-
+    fn select_candidates(&self, conn: &Connection, query_words: &[String]) -> Result<Vec<Pkg>> {
         let mut where_clauses = Vec::new();
         let mut params = Vec::new();
 
@@ -464,17 +493,14 @@ impl Napm {
 
         let mut stmt = conn.prepare(&sql)?;
 
-        let rows = stmt.query_map(
-            rusqlite::params_from_iter(params),
-            |row| {
-                Ok(Pkg {
-                    name: row.get(0)?,
-                    version: row.get(1)?,
-                    desc: row.get(2)?,
-                    repo: row.get(3)?,
-                })
-            },
-        )?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok(Pkg {
+                name: row.get(0)?,
+                version: row.get(1)?,
+                desc: row.get(2)?,
+                repo: row.get(3)?,
+            })
+        })?;
 
         Ok(rows.filter_map(rusqlite::Result::ok).collect())
     }
@@ -496,9 +522,7 @@ impl Napm {
 
             for (j, cb) in b.chars().enumerate() {
                 let cost = if ca == cb { 0 } else { 1 };
-                curr[j + 1] = (prev[j + 1] + 1)
-                    .min(curr[j] + 1)
-                    .min(prev[j] + cost);
+                curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
 
                 min_row = min_row.min(curr[j + 1]);
             }
@@ -514,14 +538,8 @@ impl Napm {
         (d <= max_dist).then_some(d)
     }
 
-    fn expand_query_words(
-        conn: &Connection,
-        query_words: &[String],
-    ) -> Result<Vec<String>> {
-
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT LOWER(name) FROM package_desc"
-        )?;
+    fn expand_query_words(conn: &Connection, query_words: &[String]) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare("SELECT DISTINCT LOWER(name) FROM package_desc")?;
 
         let dict: Vec<String> = stmt
             .query_map([], |row| row.get(0))?
@@ -550,19 +568,11 @@ impl Napm {
         Ok(expanded.into_iter().collect())
     }
 
-    fn compute_df(
-        candidates: &[Pkg],
-        query_words: &[String],
-    ) -> HashMap<String, usize> {
-
+    fn compute_df(candidates: &[Pkg], query_words: &[String]) -> HashMap<String, usize> {
         let mut df = HashMap::new();
 
         for pkg in candidates {
-            let text = format!(
-                "{} {}",
-                pkg.name.to_lowercase(),
-                pkg.desc.to_lowercase()
-            );
+            let text = format!("{} {}", pkg.name.to_lowercase(), pkg.desc.to_lowercase());
 
             let tokens = Self::tokenize(&text);
 
@@ -585,7 +595,6 @@ impl Napm {
         query_words: &[String],
         df: &HashMap<String, usize>,
     ) -> Vec<(f64, Pkg)> {
-
         const MAX_DISTANCE: usize = 2;
         const MAX_LEN_DIFF: usize = 2;
 
@@ -607,12 +616,12 @@ impl Napm {
                     score += 5.0 * idf;
                 }
 
-                if desc_tokens.iter().any(|t| *t == *q) {
+                if desc_tokens.contains(q) {
                     score += 1.5 * idf;
                 }
 
-                for token in std::iter::once(name_lc.as_str())
-                    .chain(desc_tokens.iter().map(String::as_str))
+                for token in
+                    std::iter::once(name_lc.as_str()).chain(desc_tokens.iter().map(String::as_str))
                 {
                     if token.len().abs_diff(q.len()) > MAX_LEN_DIFF {
                         continue;

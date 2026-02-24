@@ -18,9 +18,11 @@ impl Napm {
             })
         } else {
             PROGRESS_BAR_STYLE.get_or_init(|| {
-                ProgressStyle::with_template("[{elapsed:>3}] [{bar:40.cyan/blue}] {percent:>3}% {msg}")
-                    .unwrap()
-                    .progress_chars(progress_chars)
+                ProgressStyle::with_template(
+                    "[{elapsed:>3}] [{bar:40.cyan/blue}] {percent:>3}% {msg}",
+                )
+                .unwrap()
+                .progress_chars(progress_chars)
             })
         }
     }

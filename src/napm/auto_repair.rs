@@ -1,10 +1,7 @@
-use alpm::{
-    CommitData, TransFlag, Error as AlpmErr, PrepareData,
-};
+use alpm::{CommitData, Error as AlpmErr, PrepareData, TransFlag};
 
 use crate::napm::*;
-use crate::{log_info, log_fatal};
-// use crate::util::require_root;
+use crate::{log_fatal, log_info};
 
 macro_rules! log_repair {
     ($($arg:tt)*) => {{
@@ -33,9 +30,7 @@ impl Napm {
             E::DiskSpace => failed!(DiskSpace),
             E::HandleNull | E::HandleNotNull => failed!(Handle),
             E::HandleLock => {
-                log_repair!(
-                    "Handle lock detected. Attempting safe removal."
-                );
+                log_repair!("Handle lock detected. Attempting safe removal.");
 
                 let failed_result = Err(Error::DbUnlock);
                 let current_pid = std::process::id();
@@ -64,7 +59,11 @@ impl Napm {
                             .collect::<Vec<_>>();
 
                         if !lines.is_empty() {
-                            log_fatal!("Running napm processes (except {}):\n{}", current_pid, lines.join("\n"));
+                            log_fatal!(
+                                "Running napm processes (except {}):\n{}",
+                                current_pid,
+                                lines.join("\n")
+                            );
                             return failed_result;
                         } else {
                             log_repair!(" - No active napm processes detected.");
@@ -165,10 +164,13 @@ impl Napm {
                             log_fatal!(
                                 "Package {} requires {} to be installed",
                                 Pkg::format_name(&dep.target, None),
-                                Pkg::format_name(&causing_pkg, None),
+                                Pkg::format_name(causing_pkg, None),
                             );
                         } else {
-                            log_fatal!("Dependency {ANSI_YELLOW}{}{ANSI_RESET} missing", dep.target);
+                            log_fatal!(
+                                "Dependency {ANSI_YELLOW}{}{ANSI_RESET} missing",
+                                dep.target
+                            );
                         }
                     }
                 }
@@ -198,10 +200,7 @@ impl Napm {
 
                 Err(Error::FileConflicts)
             }
-            E::Retrieve => {
-                // TODO: run upgrade and retry
-                unimplemented!("handling of {error:?} aka '{error}'")
-            }
+            E::Retrieve => Err(Error::UpgradeRequired),
             E::RetrievePrepare => {
                 // Downloading/preparing package failed - retry
                 unimplemented!("handling of {error:?} aka '{error}'");
@@ -222,18 +221,24 @@ impl Napm {
     }
 
     pub fn update(&mut self, dbext: &str) -> Result<bool> {
-        log_info!("Updating {} databases", match dbext {
-            ".db" => "package",
-            ".files" => "file",
-            other => panic!("dbext = {other}")
-        });
-        
+        log_info!(
+            "Updating {} databases",
+            match dbext {
+                ".db" => "package",
+                ".files" => "file",
+                other => panic!("dbext = {other}"),
+            }
+        );
+
         self.h_mut().set_dbext(dbext);
 
         match self.h_mut().syncdbs_mut().update(false) {
             Err(e) => {
                 self.on_alpm_error(e, NapmErrorData::Empty)?;
-                self.h_mut().syncdbs_mut().update(false).map_err(|_| Error::Update)
+                self.h_mut()
+                    .syncdbs_mut()
+                    .update(false)
+                    .map_err(|_| Error::Update)
             }
             Ok(b) => Ok(b),
         }
@@ -255,39 +260,38 @@ impl Napm {
         let (error, data) = {
             match self.h_mut().trans_prepare() {
                 Ok(()) => return Ok(()),
-                Err(e) => {
-                    (e.error(), match e.data() {
+                Err(e) => (
+                    e.error(),
+                    match e.data() {
                         Some(PrepareData::PkgInvalidArch(list)) => {
                             NapmErrorData::PkgInvalidArch(list.iter().map(Pkg::from).collect())
                         }
-                        Some(PrepareData::UnsatisfiedDeps(list)) => {
-                            NapmErrorData::UnsatisfiedDeps(
-                                list.iter()
-                                    .map(|d| NapmDepMissing {
-                                        target: d.target().to_string(),
-                                        causing_pkg: d.causing_pkg().map(String::from),
-                                    })
-                                    .collect(),
-                            )
-                        }
-                        Some(PrepareData::ConflictingDeps(list)) => {
-                            NapmErrorData::ConflictingDeps(
-                                list.iter()
-                                    .map(|c| NapmConflict {
-                                        pkg1: Pkg::from(c.package1()),
-                                        pkg2: Pkg::from(c.package2()),
-                                    })
-                                    .collect(),
-                            )
-                        }
+                        Some(PrepareData::UnsatisfiedDeps(list)) => NapmErrorData::UnsatisfiedDeps(
+                            list.iter()
+                                .map(|d| NapmDepMissing {
+                                    target: d.target().to_string(),
+                                    causing_pkg: d.causing_pkg().map(String::from),
+                                })
+                                .collect(),
+                        ),
+                        Some(PrepareData::ConflictingDeps(list)) => NapmErrorData::ConflictingDeps(
+                            list.iter()
+                                .map(|c| NapmConflict {
+                                    pkg1: Pkg::from(c.package1()),
+                                    pkg2: Pkg::from(c.package2()),
+                                })
+                                .collect(),
+                        ),
                         None => NapmErrorData::Empty,
-                    })
-                }
+                    },
+                ),
             }
         };
 
         self.on_alpm_error(error, data)?;
-        self.h_mut().trans_prepare().map_err(|_| Error::TransPrepare)
+        self.h_mut()
+            .trans_prepare()
+            .map_err(|_| Error::TransPrepare)
     }
 
     pub fn trans_commit(&mut self) -> Result<()> {
@@ -295,23 +299,26 @@ impl Napm {
             match self.h_mut().trans_commit() {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    (e.error(), match e.data() {
-                        Some(CommitData::FileConflict(_)) => NapmErrorData::FileConflict(
-                            // list
-                            //     .iter()
-                            //     .map(|c| NapmConflict {
-                            //         pkg1: Pkg::from(c.package1()),
-                            //         pkg2: Pkg::from(c.package2()),
-                            //     })
-                            //     .collect()
-                            // alpm does not work (segfaults here) // TODO: do it from scratch
-                            vec![],
-                        ),
-                        Some(CommitData::PkgInvalid(list)) => {
-                            NapmErrorData::PkgInvalid(list.iter().map(String::from).collect())
-                        }
-                        Option::None => NapmErrorData::Empty,
-                    })
+                    (
+                        e.error(),
+                        match e.data() {
+                            Some(CommitData::FileConflict(_)) => NapmErrorData::FileConflict(
+                                // list
+                                //     .iter()
+                                //     .map(|c| NapmConflict {
+                                //         pkg1: Pkg::from(c.package1()),
+                                //         pkg2: Pkg::from(c.package2()),
+                                //     })
+                                //     .collect()
+                                // alpm does not work (segfaults here) // TODO: do it from scratch
+                                vec![],
+                            ),
+                            Some(CommitData::PkgInvalid(list)) => {
+                                NapmErrorData::PkgInvalid(list.iter().map(String::from).collect())
+                            }
+                            Option::None => NapmErrorData::Empty,
+                        },
+                    )
                 }
             }
         };

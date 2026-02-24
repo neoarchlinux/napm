@@ -1,5 +1,5 @@
-use crate::error::Result;
 use crate::ansi::*;
+use crate::error::Result;
 use crate::napm::Napm;
 
 pub fn run(napm: &Napm, search_terms: Vec<String>, num_results: Option<u32>) -> Result<()> {

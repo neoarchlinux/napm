@@ -1,17 +1,19 @@
 use crate::error::{Error, Result};
 use crate::log_error;
-use crate::util::{confirm, require_root};
 use crate::napm::Napm;
+use crate::util::{confirm, require_root};
 
 pub fn run(napm: &mut Napm, pkg_names: &[&str]) -> Result<()> {
     require_root()?;
-    
+
     let pkgs = {
         let pkgs_res = napm
             .pkgs(pkg_names)
             .into_iter()
             .map(|pkg| {
-                if let Ok(ref p) = pkg && let Ok(_) = napm.local_pkg(&p.name) {
+                if let Ok(ref p) = pkg
+                    && let Ok(_) = napm.local_pkg(&p.name)
+                {
                     Err(Error::PackageAlreadyInstalled(p.name.clone()))
                 } else {
                     pkg
@@ -35,7 +37,10 @@ pub fn run(napm: &mut Napm, pkg_names: &[&str]) -> Result<()> {
                 log_error!("{invalid_err}");
             }
 
-            let confirm_message = format!("Some packages were invalid, do you still want to install the rest ({})?", display_names.join(", "));
+            let confirm_message = format!(
+                "Some packages were invalid, do you still want to install the rest ({})?",
+                display_names.join(", ")
+            );
 
             if !display_names.is_empty() && !confirm(&confirm_message, true)? {
                 return Err(Error::Stopped);

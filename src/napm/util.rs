@@ -1,6 +1,4 @@
-use alpm::{
-    Alpm, SigLevel,
-};
+use alpm::{Alpm, SigLevel};
 
 use crate::napm::*;
 
@@ -21,10 +19,7 @@ impl Napm {
     }
 
     pub fn local_pkgs(&self, names: &[&str]) -> Vec<Result<Pkg>> {
-        names
-            .iter()
-            .map(|name| self.local_pkg(name))
-            .collect()
+        names.iter().map(|name| self.local_pkg(name)).collect()
     }
 
     pub fn pkg(&self, name: &str) -> Result<Pkg> {
@@ -41,10 +36,7 @@ impl Napm {
     }
 
     pub fn pkgs(&self, names: &[&str]) -> Vec<Result<Pkg>> {
-        names
-            .iter()
-            .map(|name| self.pkg(name))
-            .collect()
+        names.iter().map(|name| self.pkg(name)).collect()
     }
 
     pub fn parse_siglevel(values: &[String]) -> Result<SigLevel> {

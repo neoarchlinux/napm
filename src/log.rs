@@ -53,3 +53,11 @@ macro_rules! log_action_required {
         eprintln!(format_action_required!($($arg)*));
     }};
 }
+
+#[macro_export]
+macro_rules! log_repair {
+    ($($arg:tt)*) => {{
+        use crate::ansi::*;
+        eprintln!("[{ANSI_CYAN}AUTO REPAIR{ANSI_RESET}] {}", format!($($arg)*));
+    }};
+}
