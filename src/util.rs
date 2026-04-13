@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::ansi::*;
@@ -130,9 +130,7 @@ pub fn current_args() -> Vec<String> {
     env::args().skip(1).collect()
 }
 
-fn napm_as_root_cmd(args: Vec<String>) -> Result<(Command, String)> {
-    let cmd: &str = &current_exe();
-
+fn as_root_cmd(cmd: &str, args: Vec<String>) -> Result<(Command, String)> {
     let mut command = if is_root() {
         Command::new(cmd)
     } else {
@@ -182,36 +180,34 @@ fn napm_as_root_cmd(args: Vec<String>) -> Result<(Command, String)> {
     if is_root() {
         command.envs(envs);
         command.args(args);
-    } else {
-        if !envs.is_empty() {
-            match detect_pe_program()?.as_str() {
-                "sudo" => {
-                    for (k, v) in envs.iter() {
-                        command.arg(format!("{k}={v}"));
-                    }
-
-                    command.arg(cmd);
-
-                    command.args(args);
+    } else if !envs.is_empty() {
+        match detect_pe_program()?.as_str() {
+            "sudo" => {
+                for (k, v) in envs.iter() {
+                    command.arg(format!("{k}={v}"));
                 }
-                "doas" | "pkexec" => {
-                    let shell = detect_shell()?;
 
-                    if shell == "bash" {
-                        // TODO: match when more shells
-                        command.arg(shell);
-                        command.arg("-c");
-                        command.arg(&format!("{envs_str}{args_str}"));
-                    } else {
-                        unimplemented!("Unhandled shell: {shell}");
-                    }
-                }
-                other_pe_program => unimplemented!("Unhandled PE program: {other_pe_program}"),
+                command.arg(cmd);
+
+                command.args(args);
             }
-        } else {
-            command.arg(cmd);
-            command.args(args);
+            "doas" | "pkexec" => {
+                let shell = detect_shell()?;
+
+                if shell == "bash" {
+                    // TODO: match when more shells
+                    command.arg(shell);
+                    command.arg("-c");
+                    command.arg(format!("{envs_str}{args_str}"));
+                } else {
+                    unimplemented!("Unhandled shell: {shell}");
+                }
+            }
+            other_pe_program => unimplemented!("Unhandled PE program: {other_pe_program}"),
         }
+    } else {
+        command.arg(cmd);
+        command.args(args);
     }
 
     let cmd_display = if is_root() {
@@ -227,6 +223,12 @@ fn napm_as_root_cmd(args: Vec<String>) -> Result<(Command, String)> {
     };
 
     Ok((command, cmd_display))
+}
+
+fn napm_as_root_cmd(args: Vec<String>) -> Result<(Command, String)> {
+    let cmd: &str = &current_exe();
+
+    as_root_cmd(cmd, args)
 }
 
 pub fn require_root() -> Result<()> {
@@ -313,16 +315,32 @@ pub fn require_cache() -> Result<()> {
     run_cache_update()
 }
 
-pub fn run_upgrade() -> Result<()> {
+pub fn run_upgrade(sync_path: &PathBuf) -> Result<()> {
+    let (mut cmd_rm, _) = {
+        let mut args = vec!["-f".to_string()];
+
+        if let Ok(entries) = std::fs::read_dir(sync_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "db") {
+                    args.push(path.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        as_root_cmd("rm", args)?
+    };
+
     let (mut cmd_ud, cmd_ud_display) =
         napm_as_root_cmd(vec!["update".to_string(), "--no-file-cache".to_string()])?;
+
     let (mut cmd_ug, cmd_ug_display) = napm_as_root_cmd(vec!["upgrade".to_string()])?;
 
     if is_root() {
         log_warn!("System needs to be updated and upgraded");
 
         let prompt = format!(
-            "Do you want to run {ANSI_YELLOW}{}{ANSI_RESET} and {ANSI_YELLOW}{}{ANSI_RESET} automatically?",
+            "Do you want to remove old databases and run {ANSI_YELLOW}{}{ANSI_RESET}, and {ANSI_YELLOW}{}{ANSI_RESET} automatically?",
             cmd_ud_display, cmd_ug_display
         );
 
@@ -338,7 +356,7 @@ pub fn run_upgrade() -> Result<()> {
         );
 
         let prompt = format!(
-            "Do you want to run {ANSI_YELLOW}{}{ANSI_RESET} and {ANSI_YELLOW}{}{ANSI_RESET} automatically?",
+            "Do you want remove old databases and to run {ANSI_YELLOW}{}{ANSI_RESET}, and {ANSI_YELLOW}{}{ANSI_RESET} automatically?",
             cmd_ud_display, cmd_ug_display
         );
 
@@ -349,6 +367,19 @@ pub fn run_upgrade() -> Result<()> {
             )));
         }
     }
+
+    log_info!("Removing stale databases");
+
+    match cmd_rm.spawn()?.wait() {
+        Ok(status) => {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(Error::System)
+            }
+        }
+        Err(err) => Err(Error::InternalIO(err)),
+    }?;
 
     log_info!("{} {}", if is_root() { "#" } else { "$" }, cmd_ud_display);
 

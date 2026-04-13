@@ -17,17 +17,7 @@ impl Napm {
             let _ = std::fs::remove_file(lock_path);
 
             let sync_path = Path::new(self.h().dbpath()).join("sync");
-            if let Ok(entries) = std::fs::read_dir(&sync_path) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().map_or(false, |e| e == "db") {
-                        log_info!("Removing stale db: {}", path.display());
-                        let _ = std::fs::remove_file(path);
-                    }
-                }
-            }
-
-            run_upgrade()?;
+            run_upgrade(&sync_path)?;
 
             std::fs::File::create(std::path::Path::new(&lock_path))?;
 
