@@ -2,13 +2,57 @@ use std::path::Path;
 
 use alpm::TransFlag;
 
-use crate::napm::*;
 use crate::util::run_upgrade;
+use crate::{log_action_required, napm::*};
 use crate::{log_fatal, log_info, log_warn};
 
 impl Napm {
     pub fn install_pkgs(&mut self, pkgs: &[Pkg]) -> Result<()> {
-        let result = self.install_pkgs_attempt(pkgs);
+        let mut to_install = pkgs.to_vec();
+
+        match self.init_system() {
+            Ok(init_system) => {
+                let init_system_dependent_names = pkgs
+                    .iter()
+                    .map(|pkg| format!("{}-{}", &pkg.name, init_system.as_str()))
+                    .collect::<Vec<_>>();
+
+                let init_system_dependent = self
+                    .pkgs(
+                        init_system_dependent_names
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .as_slice(),
+                    )
+                    .into_iter()
+                    .filter_map(|r| r.ok())
+                    .collect::<Vec<_>>();
+
+                if !init_system_dependent.is_empty() {
+                    log_action_required!(
+                        "There are some additional packages you may want to install"
+                    );
+
+                    for pkg in init_system_dependent {
+                        if confirm(
+                            &format!(
+                                "Do you want to install {} - {ANSI_YELLOW}{}{ANSI_RESET}",
+                                pkg.formatted_name(false),
+                                pkg.desc
+                            ),
+                            true,
+                        )? {
+                            to_install.push(pkg);
+                        }
+                    }
+                }
+            }
+            Err(Error::NoInitSystem) => {}
+            Err(e) => return Err(e),
+        }
+
+        let result = self.install_pkgs_attempt(&to_install);
 
         if let Err(Error::UpgradeRequired) = &result {
             log_warn!("Stale database detected, update and upgrade required");
@@ -138,16 +182,6 @@ impl Napm {
 
         Ok(())
     }
-
-    // pub fn search(&self, needles: &[&str]) -> Result<Vec<Pkg>> {
-    //     let mut out = Vec::new();
-
-    //     for db in self.h().syncdbs() {
-    //         out.extend(db.search(needles.iter())?);
-    //     }
-
-    //     Ok(out.into_iter().map(Pkg::from).collect())
-    // }
 
     pub fn find(&mut self, mut file: String, exact: bool) -> Result<Vec<(Pkg, String)>> {
         file = if file.starts_with("/") {

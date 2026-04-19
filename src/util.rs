@@ -261,7 +261,8 @@ pub fn require_root() -> Result<()> {
 }
 
 pub fn run_cache_update() -> Result<()> {
-    let (mut cmd, cmd_display) = napm_as_root_cmd(vec!["update".to_string()])?;
+    let (mut cmd, cmd_display) =
+        napm_as_root_cmd(vec!["update".to_string(), "--files".to_string()])?;
 
     if is_root() {
         log_warn!("System needs to be updated");
@@ -331,9 +332,7 @@ pub fn run_upgrade(sync_path: &PathBuf) -> Result<()> {
         as_root_cmd("rm", args)?
     };
 
-    let (mut cmd_ud, cmd_ud_display) =
-        napm_as_root_cmd(vec!["update".to_string(), "--no-file-cache".to_string()])?;
-
+    let (mut cmd_ud, cmd_ud_display) = napm_as_root_cmd(vec!["update".to_string()])?;
     let (mut cmd_ug, cmd_ug_display) = napm_as_root_cmd(vec!["upgrade".to_string()])?;
 
     if is_root() {

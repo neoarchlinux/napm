@@ -83,12 +83,8 @@ enum Commands {
 
     #[command(about = "Update the package metadata, NOTE: this is not a system upgrade !!!")]
     Update {
-        #[arg(
-            long,
-            default_value_t = false,
-            help = "Do not update the file cache (just the package database)"
-        )]
-        no_file_cache: bool,
+        #[arg(long, default_value_t = false, help = "Update the file cache")]
+        files: bool,
     },
 
     #[command(about = "Upgrade all packages on the system")]
@@ -106,7 +102,7 @@ fn run() -> Result<()> {
     let mut napm = Napm::new()?;
 
     match cli.command {
-        Commands::Update { no_file_cache } => commands::update::run(&mut napm, no_file_cache),
+        Commands::Update { files } => commands::update::run(&mut napm, files),
         Commands::Files { package, dirs } => commands::files::run(&mut napm, &package, dirs),
         Commands::Info { package } => commands::info::run(&napm, &package),
         Commands::Install { packages } => commands::install::run(

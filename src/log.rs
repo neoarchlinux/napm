@@ -49,8 +49,7 @@ macro_rules! format_action_required {
 #[macro_export]
 macro_rules! log_action_required {
     ($($arg:tt)*) => {{
-        use $crate::ansi::*;
-        eprintln!(format_action_required!($($arg)*));
+        eprintln!("{}", $crate::format_action_required!($($arg)*));
     }};
 }
 

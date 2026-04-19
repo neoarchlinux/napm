@@ -124,6 +124,9 @@ pub enum Error {
 
     #[error("System upgrade reqiuired")]
     UpgradeRequired,
+
+    #[error("No init system detected")]
+    NoInitSystem,
 }
 
 impl Error {

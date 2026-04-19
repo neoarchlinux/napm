@@ -18,6 +18,7 @@ use crate::{log_error, log_info, log_warn};
 pub mod actions;
 pub mod auto_repair;
 pub mod cache;
+pub mod init_system;
 pub mod style;
 pub mod util;
 
