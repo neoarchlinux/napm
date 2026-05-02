@@ -74,7 +74,7 @@ impl Napm {
 
         let mut handle = Alpm::new("/", &cfg.db_path)?;
 
-        let arch = cfg.architecture.first().map(String::as_str).unwrap();
+        let arch = "x86_64";
 
         for dir in &cfg.cache_dir {
             let path: Vec<u8> = if dir.starts_with('/') {
@@ -327,7 +327,7 @@ fn question_callback(q: AnyQuestion, _: &mut ()) {
             );
 
             match choose(&prompt, providers.as_slice(), 0) {
-                Ok(ans) => x.set_index(ans),
+                Ok(ans) => x.set_index(ans as i32),
                 Err(err) => err.die(),
             }
         }

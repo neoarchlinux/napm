@@ -38,7 +38,7 @@ pub fn confirm(prompt: &str, default_yes: bool) -> Result<bool> {
     }
 }
 
-pub fn choose(prompt: &str, options: &[String], default: i32) -> Result<i32> {
+pub fn choose(prompt: &str, options: &[String], default: u32) -> Result<u32> {
     use std::io::{self, Write};
 
     loop {
@@ -58,11 +58,11 @@ pub fn choose(prompt: &str, options: &[String], default: i32) -> Result<i32> {
         io::stdin().read_line(&mut input)?;
         input = input.trim().to_string();
 
-        let choice: i32 = if input.is_empty() {
+        let choice: u32 = if input.is_empty() {
             default
         } else {
             match input.to_string().parse() {
-                Ok(n) if n < options.len() as i32 => n,
+                Ok(n) if n < options.len() as u32 => n,
                 _ => {
                     log_error!(
                         "Invalid option '{input}', you must choose a number between 0 and {}",

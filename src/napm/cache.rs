@@ -663,7 +663,7 @@ impl Napm {
         let df = Self::compute_df(&candidates, &query_words);
         let mut scored = Self::score_packages(candidates, &query_words, &df);
 
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(scored.into_iter().map(|(_, pkg)| pkg).collect())
     }
