@@ -346,8 +346,8 @@ impl Napm {
             Ok(Pkg {
                 name: row.get(0)?,
                 version: row.get(1)?,
-                desc: row.get(2)?,
-                repo: row.get(3)?,
+                repo: row.get(2)?,
+                desc: row.get(3)?,
             })
         }) {
             Ok(pkg) => Ok(pkg),
